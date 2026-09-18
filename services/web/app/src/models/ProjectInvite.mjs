@@ -31,6 +31,29 @@ export const ProjectInviteSchema = new Schema(
     },
     reusable: { type: Boolean, default: false },
     subscriptionId: ObjectId,
+    // Federated invite (federation module, plan 04 §3). Present ONLY on
+    // federated invites — `federated` subdoc presence is the mark (the
+    // `federated: true` boolean in v1 is retired, 04 §2.1). The owner
+    // types the anchor `bla@example.com:overleaf.uni-bremen.de` into
+    // the existing invite field; the controller splits on the LAST
+    // colon. `email` stays empty for federated rows (the anchor is not
+    // an email). `localNameHash` is the audit/rate-limit key component
+    // (04 §6), never the claim itself.
+    federated: {
+      origin: String,
+      localName: String,
+      localNameHash: String,
+      invitedBy: ObjectId,
+      homeDisplayName: String,
+      homeAvatarUrl: String,
+      authorized: { type: Boolean, default: false },
+      authorizedAt: Date,
+      status: {
+        type: String,
+        enum: ['active', 'expired', 'revoked'],
+        default: 'active',
+      },
+    },
   },
   {
     collection: 'projectInvites',

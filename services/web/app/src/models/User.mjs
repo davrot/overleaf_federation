@@ -242,6 +242,19 @@ export const UserSchema = new Schema(
     analyticsId: { type: String, required: true },
     completedTutorials: Schema.Types.Mixed,
     suspended: { type: Boolean },
+    // Federated mirror (federation module, plan 04 §1). The subdocument's
+    // PRESENCE is the mirror mark — no `kind` field. Mirror rows have
+    // `hashedPassword: undefined`, `email: ''`, `emails: []`. Reachable
+    // only via the federated OIDC grant (04 §1). `federation.origin` is
+    // the home FQDN, `federation.localName` the home login name.
+    // The `(origin, localName)` pair is unique by lookup discipline; the
+    // unique partial index (04 §9) is created by the tools/migrations
+    // migration, not in-schema (autoIndex is off repo-wide).
+    federation: {
+      origin: String,
+      localName: String,
+      federatedAt: { type: Date, default: Date.now },
+    },
     dsMobileApp: {
       subscribed: { type: Boolean },
     },
