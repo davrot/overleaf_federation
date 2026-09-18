@@ -1215,6 +1215,7 @@ module.exports = {
     'authentication/ldap',
     'authentication/saml',
     'authentication/oidc',
+    'federation', // federated identity (P0–P2); import before admin-tools
     'admin-tools', // import after authentication
     'registration-page', // import after authentication
     'template-gallery',
@@ -1223,6 +1224,14 @@ module.exports = {
     'zotero',
   ],
   viewIncludes: {},
+
+  federation: {
+    enabled: false, // master toggle per instance (05 §7)
+    allowFederatedProjectCreate: false, // partner-side: mirrors may create projects (01 §3.4)
+    requireAdminApproval: true, // B-side: approve received pins (pairwise) / registration (institutional, P3)
+    keyRotationGraceDays: 14, // federation key retire window (02 §5)
+    institutionId: null, // e.g. 'dfn-de'; when set (P3), leaf adds authority_hints + institution
+  },
 
   csp: {
     enabled: process.env.CSP_ENABLED === 'true',

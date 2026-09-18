@@ -120,9 +120,16 @@ injects it; we merge `OidcProviderRole.metadata` into the leaf EC we serve.
 - `OIDCRegistrationAdapter` is exported (for institutional
   client-metadata validation on OP-side receive).
 
-## Leaf metadata requirements (Zod, verified — leaf EC **must** have):
-- `metadata.openid_provider.issuer` **MUST equal** the leaf entity id
-  (Zod `superRefine` check 16: "MUST match entity identifier").
+## Leaf metadata issuer (verified npm 1.0.0, 2026-09-18)
+- FINDINGS v1 claimed "`openid_provider.issuer` MUST equal the entity id
+  (leaf check 16)" — that is a **git-source/v0 draft claim, NOT enforced by
+  npm v1.0.0** (`verifyEntityStatement` accepts both `issuer=<entity id>` and
+  `issuer=<entity id>/federation/oidc`; both pass end-to-end —
+  issuer_check.mjs). OIDF v1.0 treats the metadata `issuer` as the OP
+  server's issuer, so we set the OIDC OP issuer
+  (`<entity id>/federation/oidc`) — self-consistent with oidc-provider's
+  own issuer and the peer-side OP role issuer. Both pass npm
+  verify; the OP role (peer-side, P3) is what consumes it.
 - Required in `openid_provider`: `issuer` (URL),
   `authorization_endpoint` (URL), `response_types_supported` (array),
   `subject_types_supported` (array),

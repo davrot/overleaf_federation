@@ -132,7 +132,7 @@
     "@stripe/stripe-js": "7.7.0",
     "cache-flow": "1.9.0",
     "focus-trap-react": "11.0.4",
-    "jose": "4.15.5",
+    "jose": "6.2.10",
     "nodemailer": "8.0.5",
     "on-headers": "1.0.2",
     "pug": "3.0.3",
