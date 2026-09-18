@@ -61,8 +61,12 @@ critical correction to v0/v1 plan claims:**
   For P0–P2 pairwise leaf serving we use `@oidfed/core`'s
   `signEntityConfiguration` directly (already planned, §2).
 
-**`jose` v4.15.5** (repo top-level): `jwtVerify` + `compactVerify` exist.
-Use `jwtVerify` in new code.
+**`jose` 6.2.10** (repo top-level, single physical copy): `jwtVerify` + `compactVerify` exist.
+Use `jwtVerify` in new code. The pre-2021 `4.15.5` pin in `resolutions` was a
+runtime lie: `oidc-provider@9.12.2` declares `jose: ^6.2.10` and `@oidfed/core`
+declares `jose 6.2.3`, both satisfied by 6.2.10; v9 is written against the v6
+API (`new CompactSign(...).sign(key)` accepts a plain private JWK), so the repo
+now resolves `jose` to 6.2.10 everywhere (see `FINDINGS.md`, "jose bump").
 
 ## The pairwise-works, registration-fail finding
 
@@ -276,6 +280,6 @@ injects it; we merge `OidcProviderRole.metadata` into the leaf EC we serve.
   `config/settings.defaults.js:1207 moduleImportSequence`). The
   federation module goes in `modules/moduleImportSequence` as its own
   entry, with its own `index.mjs`/`index.mts`.
-- **`Settings.origin`** (not `Settings.siteUrl`) should be used for the
-  entity id (overleaf-cep uses `origin`, not `siteUrl`, for
-  canonical-origin identity; check `settings.defaults.js`).
+- ~~`Settings.origin` (not `Settings.siteUrl`)…~~ — **RETRACTED**: `settings.defaults.js`
+  defines `siteUrl` and has no `origin` field; entity id derives from
+  `new URL(Settings.siteUrl).hostname` (code as committed).

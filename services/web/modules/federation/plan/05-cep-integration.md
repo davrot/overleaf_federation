@@ -165,10 +165,10 @@ all three are ≤30 lines with the existing top-level `jose`.
   `code_challenge_method=S256`; `client_id` is A's deterministic URN
   (04 §7), no secret.
 
-### 3.2 `CodeExchange.mjs` (fetch + jose v4)
+### 3.2 `CodeExchange.mjs` (fetch + jose v6)
 
 ```js
-import { jwtVerify } from 'jose'   // repo-top-level jose, v4.15.5 (existing dep, NOT a new one)
+import { jwtVerify } from 'jose'   // repo-top-level jose, 6.2.10 (single copy via `resolutions.jose`; oidc-provider v9 + @oidfed/core both declare ^6 — the earlier v4 pin was a runtime lie, see FINDINGS)
 
 async function exchange(peerOrigin, { code, codeVerifier, state, intent }) {
   const jwks = await fetchJwksWithCache(peerOrigin)       // 04 §6: f:oidc-jwks:<origin>, 1 h
@@ -603,24 +603,33 @@ for the consent step (default behaviour already).
 
 ```
 claims: {
-  openid: ['sub', 'origin', 'localName', 'displayName', 'institution', 'language', 'avatarUrl'],
+  // v1 wire claims (01 §5). `language`/`avatarUrl` (04 §4.1 opt-in) are NOT
+  // in the v1 set: this User model has neither field and there is no
+  // `Settings.uiLocale` — they re-join as a per-B-admin extension when the
+  // profile data exists (04 §4.1 allow-list is unchanged).
+  openid: ['sub', 'origin', 'localName', 'displayName', 'institution'],
 }
 findAccount: async (ctx, accountId) => {
-  const user = await User.findOne({ _id: accountId })
+  const user = await User.findById(accountId)
   if (!user) return undefined
   return {
     accountId: user._id,
-    claims: {  // these values are placed VERBATIM into the id_token
+    claims: async () => ({  // values placed VERBATIM into the id_token
       origin: new URL(Settings.siteUrl).hostname,  // B's origin FQDN (01 §5)
       localName: user.email,                 // (colon-forbidden, 04 §1.1) — the anchor (01 §3.3)
-      displayName: user.displayName || user.email,
+      displayName: `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.email,
       institution: user.institution || '',
-      language: Settings.uiLocale || 'en',
-      avatarUrl: user.avatarUrl || '',
-    },
+    }),
   }
 }
 ```
+
+**Gating (v9.12.2, empirically verified in `e2e_probe.mjs`)**: v9 prunes
+id_token claim *names* to `claimsSupported`, which is built from this
+`claims:` mapping — the default (`defaults.js`) seeds only `sub`, so without
+it the identity claims above are silently dropped from the id_token and
+A-side `claims.origin !== peerOrigin` fails. The mapping above is
+therefore not style: it is the load-bearing part of §8.5.
 
 (`sub` is **not** in this map for public subjectType
 (the account claim map returns the values above; `sub` is
