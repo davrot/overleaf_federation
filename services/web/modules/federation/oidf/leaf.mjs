@@ -22,9 +22,6 @@ import { signEntityConfiguration } from '@oidfed/core'
 
 import { createKeyProvider, leafJwksPayload } from './keystore.mjs'
 
-const PROVIDER_KEY = 'provider'
-const KEY_PROVIDER = 'provider'
-
 /**
  * Our entity identifier (02 §5, 04 §1): the HTTPS origin of this instance,
  * WITHOUT port. MUST be HTTPS (OIDF 1.0 requires the `https:` scheme on
