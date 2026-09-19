@@ -133,12 +133,21 @@ cd services/web
 
 ---
 
-## Design authority
+## Design authority + plan coverage
 
-Source of truth for this module is the plan set in [`plan/`](./plan/):
-00-overview, 01 (identity-federation-protocol), 02 (trust-model-oidf), 03
-(S2S wire), 04 (data model), 05 (CEP integration / OIDC provider), 06 (security),
-07 (roadmap + testing). When in doubt, **the plan wins over code comments**.
+Source of truth for this module is the plan set in [`plan/`](./plan/).
+When in doubt, **the plan wins over code comments**.
+
+| Plan | Specifies | Where implemented | Covered |
+|---|---|---|---|
+| 00-overview | Scope: identity federation only (no content) | README scope box, ADMIN-GUIDE §8 | ✅ |
+| 01-identity-federation-protocol | A=RP/B=OP direction, anchor serialization `localName:origin`, mirror is a regular `User` | `util/Anchor.mjs`, `app/models/`, `invite/`, `rp/` | ✅ |
+| 02-trust-model-oidf | TOFU depth-1 pin, institutional chain, key rotation grace | `admin/` pin path, `oidf/anchors.mjs`, `oidf/keystore.mjs` | ✅ (incl. P3 institutional pin) |
+| 03-s2s-wire-protocol | Envelope 401/429/200, 3 actions, rate-limit budgets | `s2s/`, `oidf/verify.mjs`, `util/RateLimitStore.mjs` | ✅ |
+| 04-data-model | `FederationPeer`, `FederationKey`, `FederationTrustAnchor`, `User.federation`, `ProjectInvite.federated`, wire claims allow-list | `app/models/`, `app/src/models/`, `oidc/createProvider.mjs`, `admin/` | ✅ (incl. TA model) |
+| 05-cep-integration | OIDC provider grounding (oidc-provider v9.12.2), leaf EC, consent, bridge, RP state/PKCE | `oidc/`, `oidf/leaf.mjs`, `app/views/consent.pug`, `rp/` | ✅ |
+| 06-security | Redaction, no-PII audit, open-redirect guard, fetch timeouts, salted hash | `util/Redact.mjs`, `util/Audit.mjs`, `rp/CallbackRouter.mjs`, all fetch sites | ✅ (this session's batch) |
+| 07-roadmap-and-testing | P0–P2 scope, unit+validation gate, two-instance integration | `test/`, HANDOFF SESSION 5 | ✅ unit; integration is next |
 
 `HANDOFF.md` is the session-by-session project state log.
 `ADMIN-GUIDE.md` is how to install, boot, pin, and test a live pair.
