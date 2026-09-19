@@ -1,0 +1,28 @@
+doctype html
+html(lang='en')
+	- metadata = {title: title || 'Allow access'}
+
+	head
+		title= metadata.title
+		meta(name='federation' content='consent')
+		link(rel='icon' href='/favicon.ico')
+
+	body.consent-view
+		main.consent-container
+			h1= metadata.title
+			p
+				| The federated service
+				if client_id
+					|  #{client_id}
+				|  is requesting a federated session.
+			if scopes.length || claims.length
+				p Scope and claims requested:
+				ul
+					each scope in (scopes || [])
+						li= scope
+					each claim in (claims || [])
+						li= claim
+			form.consent-form(action=grantUrl method='POST')
+				button.btn.btn-primary Allow access
+			form.consent-form(action=denyUrl method='POST')
+				button.btn.btn-secondary Deny

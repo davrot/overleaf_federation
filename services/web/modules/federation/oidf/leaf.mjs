@@ -72,10 +72,10 @@ export function oidcEndpoints() {
   const issuer = `${base}/federation/oidc`
   return {
     issuer,
-    authorization: `${base}/federation/oidc/authorize`,
+    authorization: `${base}/federation/oidc/auth`,
     token: `${base}/federation/oidc/token`,
     jwks: `${base}/federation/oidc/jwks`,
-    callback: `${base}/federation/oidc/callback`,
+    callback: `${base}/federation/oidc/rp/callback`,
     endSession: `${base}/federation/oidc/session/end`,
   }
 }
@@ -97,7 +97,7 @@ export function buildLeafMetadata(entityId) {
   return {
     openid_provider: {
       issuer: endpoints.issuer, // = <entity id>/federation/oidc; provider issuer
-      authorization_endpoint: `${endpoints.issuer}/authorize`,
+      authorization_endpoint: endpoints.authorization,
       token_endpoint: `${endpoints.issuer}/token`,
       jwks_uri: `${endpoints.issuer}/jwks`,
       grant_types_supported: ['authorization_code'],

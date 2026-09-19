@@ -17,9 +17,9 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| P0 | leaf mount + keystore bootstrap + OIDC OP stack + adapter + bridge + clients | files exist; util/ + data model **DONE**; index.mjs + provider mount still to wire |
-| P1 | S2S (pairwise depth-1 verify) + invite + A-side grant round-trip (RP) + admin pin stub | s2s/ next; rp/ invite/ missing |
-| P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit | rate-limit (03 §5) handled by s2s RateLimitStore; rest missing |
+| P0 | leaf mount + keystore bootstrap + OIDC OP stack + adapter + bridge + clients | **DONE** (index.mjs mounted; 2026-09-18b batch) |
+| P1 | S2S (pairwise depth-1 verify) + invite + A-side grant round-trip (RP) + admin pin stub | **DONE** (s2s/ + rp/ + admin/ committed 2026-09-18b) |
+| P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit | rate-limit + audit + admin **DONE**; claim allow-list + live Settings integration open |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -253,6 +253,18 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 
 ## 9. Progress Log
 
+### [SESSION 4] 2026-09-18 — P0–P2 module COMPLETED (committed batch of 2026-09-18b)
+- **All module code written and committed**: `s2s/` (S2sRouter + 3 actions), `rp/` (State HMAC + PKCE, CodeExchange fetch+jose, CallbackRouter), `invite/` (controller+router), `admin/` (controller+router), `index.mjs` (WebModule wiring), `app/views/consent.pug`, `util/RateLimitStore.mjs`.
+- **Bug fixes** (allowed: oidc/ + test-caught): `createProvider.mjs` missing `await` on `buildOidcProviderClients()`; `leaf.mjs` `oidcEndpoints()` authorization `/authorize`→`/auth` (the endpoint oidc-provider v9 actually mounts) and callback → `/federation/oidc/rp/callback` (the route CallbackRouter mounts);
+- `rp/CodeExchange.mjs` `resolveJwk` read `kid` from the JWT **header** (`decodeProtectedHeader`) — jose v6 `decodeJwt` returns claims only.
+- **Tests: 60/60 green** — keystore 12, invite 12, admin 19, CodeExchange 7 (jose v6 verify pattern: `importJWK` + `new SignJWT().setProtectedHeader({kid,alg}).sign(key)`; `@oidfed/core` `generateSigningKey('ES256')` for throwaway keys), State 10.
+- **ESLint**: module-wide `--max-warnings 0` clean (32 .mjs files). Commands from `services/web`:
+  `../../node_modules/.bin/vitest run -c vitest.config.js modules/federation/test/unit/...` and `../../node_modules/.bin/eslint --no-cache --max-warnings 0 'modules/federation/**/*.mjs'`.
+- **Known env caveats** (tests are hermetic; no live-redis/integration round-trip yet):
+  `chai-as-promised` is active → `expect(p).rejects.toThrow(...)` breaks in vitest (assertion becomes "the promise fulfilled"); use manual `await expect(() => ...).rejectedToMatch(...)` pattern or `Promise.race`-style assertions.
+  Node `crypto.exportKey`/`webcrypto.exportKey` unavailable in this build → generate test keys via `@oidfed/core`.
+- **NOT committed (intentional)**: probe scratch `services/web/{oidc_mount_probe.mjs,oidc_v9probe.mjs,probe_dbg2.mjs}` (untracked), `node_modules/`, `.pi/`, `.yarn/`. `.gitignore` has only 4 entries — NEVER `git add -A`; stage explicit paths only.
+
 ### [SESSION 2] 2026-09-18 — util + data model completed
 - **Wrote** `util/Anchor.mjs` (`parseAnchor`/`formatAnchor`/`validateAnchor`/`saltedLocalNameHash` (32-hex HMAC, session-secret salted)/`hashInviteeEmail`/`resolveAnchorUser`), `util/Redact.mjs` (`redact`/`publicJwks`/`assertionMeta`), `util/Audit.mjs` (`audit()` fire-and-forget, `AUDIT_TYPES` 04 §8 v2).
 - **Added** `federation` subdoc to `User.mjs` and `federated` subdoc to `ProjectInvite.mjs` (04 §1/§2 + HANDOFF §4.5/§4.6 reconciled fields). Migration `tools/migrations/20260721120000_add_federation_indexes.mjs` (3 index sets) + updated helpers docs.
@@ -304,7 +316,8 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 
 ### NEXT ACTIONS (fresh build order)
 > **ENV NOTE**: memory tool is broken in this env (sqlite `database disk image is malformed`) — HANDOFF.md + FINDINGS.md are the sole persistent state.
-1. `util/RateLimitStore.mjs` — `checkRateLimit(redis, { action, callerOrigin, localNameHash? }) -> { allowed, retryAfterSeconds }` (decision §7)
+> **STATUS (2026-09-18b)**: 1–7 DONE (batch committed), 8 validation gate DONE (60/60). Remaining: integration round-trip (two in-proc apps + fake redis), Settings integration TODO-4c7da2af, and frontend (§3.8 overleaf-cep).
+1. ~~`util/RateLimitStore.mjs`~~ DONE
 2. `s2s/` — 3 action files + `S2sRouter.mjs` (decisions §1–§8, ordering §2). Router shape: `{ apply(webRouter) { webRouter.post('/federation/s2s', asyncHandler) } }`.
 3. `oidc/createProvider.mjs` bug fix (await clients) + `app/views/consent.pug` (minimal: user display, app/client, allow button, deny, submit `state`/`consent` fields per bridge.mjs POST contract)
 4. `index.mjs` — default export WebModule: `nonCsrfRouter` (① S2S always ② bridge if enabled ③ provider terminal if enabled) + `appMiddleware` (leaf `GET /.well-known/openid-federation` + `GET /federation/federation-keys`, gated, app-level for req.hostname) + `start()` (gated; `ensureBootstrapped()` keystore bootstrap + `retireExpiredKeys()`)
@@ -319,10 +332,10 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 | TODO-1f4e6ae5 | util layer (Anchor, Redact, Audit + RateLimitStore) | P0 | **util trio DONE**; RateLimitStore pending (in ec1f0879) |
 | TODO-c7238651 | User.federation + ProjectInvite.federated schema | P0 | **DONE** (incl. migration) |
 | TODO-bc8ad398 | leaf.mjs serve + mount helper | P0 | leaf committed; mount wiring = index.mjs (1fed7e98) |
-| TODO-ec1f0879 | S2S router + 3 actions + rate limit | P1 | **IN PROGRESS** — next build |
-| TODO-7e3fc1d8 | A-side RPC CodeExchange + CallbackRouter | P1 | open |
-| TODO-c6bbd319 | invite controller/router | P1 | open |
-| TODO-5d6003df | admin router/controller + consent view | P2 | open (consent.pug needed by bridge) |
-| TODO-1fed7e98 | index.mjs mount wiring + start | P0 | open (after s2s) |
+| TODO-ec1f0879 | S2S router + 3 actions + rate limit | P1 | **DONE** (committed 2026-09-18b) |
+| TODO-7e3fc1d8 | A-side RPC CodeExchange + CallbackRouter | P1 | **DONE** (committed 2026-09-18b) |
+| TODO-c6bbd319 | invite controller/router | P1 | **DONE** (committed 2026-09-18b) |
+| TODO-5d6003df | admin router/controller + consent view | P2 | **DONE** (committed 2026-09-18b) |
+| TODO-1fed7e98 | index.mjs mount wiring + start | P0 | **DONE** (committed 2026-09-18b) |
 | TODO-4c7da2af | Settings + app-level auth guards | integration | open |
-| TODO-fd9f09c0 | unit tests + validation gate | testing | open (regression baseline 12/12 pass) |
+| TODO-fd9f09c0 | unit tests + validation gate | testing | **DONE** (60/60 green, ESLint clean) committed 2026-09-18b |

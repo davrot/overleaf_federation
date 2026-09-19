@@ -77,7 +77,7 @@ export async function getOidcProvider() {
       keys: keys.map(k => ({ ...k, alg: k.alg || 'ES256', crv: k.crv, d: k.d, x: k.x, y: k.y })),
     },
     findAccount,
-    clients: buildOidcProviderClients(),
+    clients: await buildOidcProviderClients(),
     interactions: {
       // Absolute URL pointing at our bridge under the mount prefix.
       // v9: `interactions.url` returns the redirect target for the interaction
