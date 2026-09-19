@@ -1231,6 +1231,7 @@ module.exports = {
     requireAdminApproval: true, // B-side: approve received pins (pairwise) / registration (institutional, P3)
     keyRotationGraceDays: 14, // federation key retire window (02 §5)
     institutionId: null, // e.g. 'dfn-de'; when set (P3), leaf adds authority_hints + institution
+    institutionAuthorityHints: [], // OIDF intermediate authority chain to publish on the leaf (P3, 07 §P3)
   },
 
   csp: {

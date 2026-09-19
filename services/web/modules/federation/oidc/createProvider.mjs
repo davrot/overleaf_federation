@@ -58,7 +58,7 @@ async function findAccount(ctx, sub, source) {
       origin: new URL(Settings.siteUrl).hostname,
       localName: user.email,
       displayName: `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.email,
-      institution: user.institution || '',
+      institution: user.institution || null,
     }),
   }
 }

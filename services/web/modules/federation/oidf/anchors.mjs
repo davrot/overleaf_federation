@@ -12,6 +12,7 @@ import { createTrustAnchorSet } from '@oidfed/core'
 import logger from '@overleaf/logger'
 
 import { FederationPeer } from '../app/models/FederationPeer.mjs'
+import { FederationTrustAnchor } from '../app/models/FederationTrustAnchor.mjs'
 
 /**
  * Build the trust-anchor set from APPROVED peers (02 §3 depth-1 case:
@@ -54,4 +55,35 @@ export async function createTrustAnchorSetFromPeers(explicitAnchors = []) {
   }
 
   return createTrustAnchorSet(rows)
+}
+
+/**
+ * Institutional anchor set (02 §3, 07 §P3): every configured TA row
+ * (`FederationTrustAnchor`), keyed by the TA's entity id. These are
+ * additive to the peer-pin anchors — the runtime S2S path (depth-1, the
+ * peer's own pinned key) does NOT consult this set; it feeds the
+ * PIN-TIME institutional chain resolve and any future IA hierarchy
+ * (02 §3: "scale-out is data, not code").
+ *
+ * @returns {Promise<Array<{ entityId: string, jwks: { keys: Array } }>>}
+ */
+export async function institutionalAnchorsFromDb() {
+  const tAs = await FederationTrustAnchor.find({})
+  return tAs.map((ta) => ({
+    entityId: ta.entityId,
+    jwks: ta.jwks,
+  }))
+}
+
+/**
+ * The instance's FULL trust-anchor set: approved peer pins + every
+ * configured institutional TA. This is the map a (future) P3 explicit
+ * `OidcProviderRole.initialize` consumes, and what the admin-pin chain
+ * resolve (institutional path) verifies against.
+ *
+ * @returns a `Map<EntityId, { jwks: Jwks }>`.
+ * */
+export async function createTrustAnchorSetForInstance() {
+  const explicit = await institutionalAnchorsFromDb()
+  return await createTrustAnchorSetFromPeers(explicit)
 }

@@ -120,6 +120,12 @@ export function buildLeafMetadata(entityId) {
  * Sign the leaf EC we serve. Signed by the ACTIVE federation key
  * (02 §5); `jwks` carries public halves of every non-revoked key
  * (published + active + retiring = grace window, 02 §5).
+ * Institutional institution (P3): when `Settings.federation.
+ * institutionAuthorityHints` is non-empty (this instance presents itself
+ * as an institution member under an authority chain), the leaf EC carries
+ * `authority_hints` and peers' admin-pin resolve walks up through the
+ * chain to a TA (02 §3/§4, 07 §P3). Pairwise (default, empty hints):
+ * the leaf carries NO hints and peers pin us directly.
  * TTL 48h (DEFAULT_ENTITY_STATEMENT_TTL_SECONDS in @oidfed/core).
  * Not signed per-request on purpose: ES256 is cheap and this avoids a
  * cache layer; peers re-fetch on kid mismatch (06 §2).
@@ -129,11 +135,21 @@ export async function buildLeafEntityConfiguration() {
   const provider = createKeyProvider()
   const keySet = await provider.getFederationKeySet()
   const jwks = await leafJwksPayload()
+  const hints =
+    typeof Settings.federation.institutionAuthorityHints === 'string'
+      ? JSON.parse(Settings.federation.institutionAuthorityHints || '[]')
+      : Array.isArray(Settings.federation.institutionAuthorityHints)
+        ? Settings.federation.institutionAuthorityHints
+        : []
+  const hintsFiltered = hints.filter(
+    (h) => typeof h === 'string' && h.length > 0,
+  )
   return await signEntityConfiguration({
     signer: keySet.signer,
     entityId,
     jwks,
     metadata: buildLeafMetadata(entityId),
+    ...(hintsFiltered.length > 0 ? { authorityHints: hintsFiltered } : {}),
   })
 }
 

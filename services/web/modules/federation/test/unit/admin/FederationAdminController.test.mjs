@@ -73,6 +73,31 @@ vi.mock('../../../app/models/FederationKey.mjs', () => ({
   },
 }))
 
+vi.mock('../../../app/models/FederationTrustAnchor.mjs', () => ({
+  FederationTrustAnchor: {
+    find: () => ({
+      lean: () => Promise.resolve(globalThis.__TA_LIST ?? []),
+    }),
+    findOne: vi.fn(async () => globalThis.__TA_ONE),
+    create: vi.fn(async (attrs) => (attrs)),
+    deleteOne: vi.fn(async () => ({ n: 1 })),
+  },
+}))
+
+// @oidfed/core: keep the REAL signer/keygen/EC primitives (the pin tests
+// depend on them), but drive `discoverEntity` (institutional chain-walk)
+// from a controllable thunk so no live fetch happens in the unit pass.
+vi.mock('@oidfed/core', async () => {
+  const actual = await vi.importActual('@oidfed/core')
+  return {
+    ...actual,
+    discoverEntity: (...c) =>
+      globalThis.__discoverEntity ?
+        globalThis.__discoverEntity(...c)
+        : Promise.resolve({ ok: false, error: { message: 'unset-thunk' } }),
+  }
+})
+
 vi.mock('../../../oidc/createProvider.mjs', () => ({
   _resetForTest: vi.fn(),
 }))
@@ -138,6 +163,10 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
     globalThis.__PEER_LIST = []
     globalThis.__KEY_LIST = []
     globalThis.__AUDIT_ROWS = []
+    globalThis.__TA_LIST = []
+    globalThis.__TA_ONE = undefined
+    globalThis.__discoverEntity = undefined
+    globalThis.__discoverOpts = undefined
     globalThis.__CREATED = undefined
     globalThis.__KEY_PROVIDER = {
       publishKey: vi.fn(async () => ({})),
@@ -208,6 +237,7 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
       expect(res.jsonCalls[0]).toEqual({
         origin: 'beta.example',
         status: 'pending',
+        mode: 'pairwise',
         kid: publicJwk.kid,
         thumbprint,
       })
@@ -225,6 +255,110 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
         'federation_trust_anchor_pinned',
       ])
       expect(auditCalls().at(-1)[0].meta.anchorThumbprint).toBe(thumbprint)
+    })
+
+    it('leaf EC with authority_hints + no TA configured → 400 institutional-anchor-missing', async () => {
+      // An institutional leaf (non-TA) MUST carry authority_hints (EC
+      // check 14). buildLeafEcWithHints signs such an EC; no TA rows are
+      // configured (mock __TA_LIST empty) → the pin is refused before any
+      // chain resolve (guard: we can't verify what we can't anchor).
+      const { generateSigningKey, createFederationSigningKey, signEntityConfiguration } =
+        await import('@oidfed/core')
+      const generated = await generateSigningKey('ES256')
+      const { signer, publicJwk } = createFederationSigningKey(generated.privateKey)
+      const institutionalEc = await signEntityConfiguration({
+        signer,
+        entityId: 'https://beta.example',
+        jwks: { keys: [publicJwk] },
+        authorityHints: ['https://ia.ta.edu'],
+      })
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => institutionalEc,
+      }))
+      globalThis.__TA_LIST = [] // no institutional TA pinned in
+      globalThis.__CREATED = undefined
+      const res = mkRes()
+      await Mod.handlePin({ body: { origin: 'beta.example' } }, res)
+      expect(res.statuses).toEqual([400])
+      expect(res.jsonCalls[0].code).toBe('institutional-anchor-missing')
+      // Refused before any row creation.
+      expect(globalThis.__CREATED).toBeUndefined()
+    })
+
+    it('institutional leaf + TA configured + chain resolves → 201 institutional peer', async () => {
+      const {
+        generateSigningKey,
+        createFederationSigningKey,
+        signEntityConfiguration,
+      } = await import('@oidfed/core')
+      const generatedTas = await generateSigningKey('ES256')
+      const taSigners = createFederationSigningKey(generatedTas.privateKey)
+      const generated = await generateSigningKey('ES256')
+      const { signer, publicJwk } = createFederationSigningKey(generated.privateKey)
+      // TA keypair: its public JWK goes into the __TA_LIST row (pinned TA).
+      const taJwk = taSigners.publicJwk
+      const leafEc = await signEntityConfiguration({
+        signer,
+        entityId: 'https://beta.example',
+        jwks: { keys: [publicJwk] },
+        authorityHints: ['https://ia.ta.edu'],
+      })
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => leafEc,
+      }))
+      // One pinned institutional TA on file (handlePin just maps rows
+      // into createTrustAnchorSet — shape is { entityId, jwks }).
+      globalThis.__TA_LIST = [
+        { entityId: 'https://ta.edu', jwks: { keys: [taJwk] } },
+      ]
+      // Chain-walk is mocked: the leaf resolves to a configured TA.
+      const expiresAt = new Date('2027-01-01T00:00:00Z')
+      globalThis.__discoverEntity = async (entityId, taSet, opts) => {
+        globalThis.__discoverOpts = opts
+        return {
+          ok: true,
+          value: {
+            entityId,
+            resolvedMetadata: {},
+            trustChain: {
+              entityId,
+              statements: [],
+              trustAnchorId: 'https://ta.edu',
+              expiresAt,
+              resolvedMetadata: {},
+              trustMarks: [],
+            },
+            trustMarks: [],
+          },
+        }
+      }
+      const res = mkRes()
+      await Mod.handlePin({ body: { origin: 'beta.example' } }, res)
+      expect(res.statuses).toEqual([201])
+      expect(res.jsonCalls[0]).toMatchObject({
+        origin: 'beta.example',
+        status: 'pending',
+        mode: 'institutional',
+      })
+      expect(res.jsonCalls[0].kid).toBe(publicJwk.kid)
+      expect(globalThis.__CREATED[0]).toMatchObject({
+        origin: 'beta.example',
+        mode: 'institutional',
+        registration: {
+          clientId: 'urn:overleaf-federation:client:beta.example',
+          expiresAt,
+          trustChainExpiresAt: expiresAt,
+        },
+      })
+      // Chain-walk options: bounded fetch timeout + bounded depth (06 §4).
+      expect(globalThis.__discoverOpts).toMatchObject({
+        httpTimeoutMs: expect.any(Number),
+        maxChainDepth: 10,
+      })
     })
 
     it('leaf fetch failure → 502 peer-unreachable', async () => {

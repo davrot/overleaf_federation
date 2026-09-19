@@ -41,11 +41,14 @@ import {
   decodeEntityConfiguration,
   generateSigningKey,
   createFederationSigningKey,
+  createTrustAnchorSet,
+  discoverEntity,
   jwkThumbprint,
 } from '@oidfed/core'
 import { expressify } from '@overleaf/promise-utils'
 import { FederationKey } from '../app/models/FederationKey.mjs'
 import { FederationPeer } from '../app/models/FederationPeer.mjs'
+import { FederationTrustAnchor } from '../app/models/FederationTrustAnchor.mjs'
 import { _resetForTest } from '../oidc/createProvider.mjs'
 import { buildS2sRequest } from '../oidf/ClientAssertionClient.mjs'
 import { createKeyProvider } from '../oidf/keystore.mjs'
@@ -53,6 +56,10 @@ import { audit, AUDIT_TYPES } from '../util/Audit.mjs'
 import { ProjectAuditLogEntry } from '../../../app/src/models/ProjectAuditLogEntry.mjs'
 
 export const DIRECTIONS = ['outbound', 'inbound', 'both']
+
+// Outbound hardening (06 §7): pin-time leaf fetch + revoke S2S cap at
+// 10 s; admin UIs never block longer than that.
+const ADMIN_OUTBOUND_FETCH_TIMEOUT_MS = 10000
 
 // Bare FQDN (the FederationPeer.origin + S2S wire `from` convention,
 // 03 §2). Ports/schemes rejected at the source: the entity id is always
@@ -134,6 +141,7 @@ async function handlePin(req, res) {
   try {
     const resp = await fetch(leafUrl, {
       headers: { Accept: 'application/entity-statement+jwt' },
+      signal: AbortSignal.timeout(ADMIN_OUTBOUND_FETCH_TIMEOUT_MS),
     })
     if (!resp.ok) {
       logger.warn({ leafUrl, status: resp.status }, 'federation: pin leaf fetch not ok')
@@ -180,6 +188,72 @@ async function handlePin(req, res) {
       .json({ message: `leaf entity configuration is not for ${origin}`, code: 'invalid-ec' })
   }
 
+  // Institutional path (02 §3/§4, 07 §P3): if the leaf carries
+  // `authority_hints`, resolve the OIDF chain up through the configured
+  // institutional trust anchors at PIN TIME. Runtime S2S verification
+  // stays depth-1 (the peer's own active key, selected below) — the
+  // institutional walk is a trust decision over the fetched chain, and
+  // the anchor we store is still the leaf's active self-key (02 §6: "the
+  // leaf's authority_hints walk up through institutional TA/IA
+  // statements — same resolve path"). Without institutional anchors we
+  // cannot verify such a leaf, so the pin is refused.
+  const authorityHints = Array.isArray(payload.authority_hints)
+    ? payload.authority_hints
+      .filter((h) => typeof h === 'string' && h.length > 0)
+      : []
+  let mode = 'pairwise'
+  let registration
+  if (authorityHints.length > 0) {
+    const tAs = await FederationTrustAnchor.find({}).lean()
+    if (tAs.length === 0) {
+      logger.warn(
+        { expectedEntityId },
+        'federation: pin has authority_hints but no institutional trust anchors are configured',
+      )
+      return res.status(400).json({
+        message:
+          'peer is an institutional leaf (authority_hints present) but this instance has no institutional trust anchors configured',
+        code: 'institutional-anchor-missing',
+      })
+    }
+    let discovery
+    try {
+      const taSet = createTrustAnchorSet(tAs.map((ta) => ({
+        entityId: ta.entityId,
+        jwks: ta.jwks,
+      })))
+      discovery = await discoverEntity(expectedEntityId, taSet, {
+        httpTimeoutMs: ADMIN_OUTBOUND_FETCH_TIMEOUT_MS,
+        maxChainDepth: 10,
+      })
+    } catch (error) {
+      logger.warn({ error, expectedEntityId }, 'federation: institutional chain discovery failed')
+      return res
+        .status(400)
+        .json({ message: `institutional chain resolve failed: ${error.message}`, code: 'institutional-chain-failed' })
+    }
+    if (!discovery.ok) {
+      logger.warn(
+        { expectedEntityId, error: discovery.error },
+        'federation: institutional chain did not resolve to a configured TA',
+      )
+      return res.status(400).json({
+        message: `institutional chain did not resolve to a configured trust anchor: ${discovery.error?.description || discovery.error?.message || 'trust-chain-invalid'}`,
+        code: 'institutional-chain-untrusted',
+      })
+    }
+    // Resolved: the chain terminates at one of our configured TAs. The
+    // registration subdoc is audit/replay (04 §2: "the anchor pin itself
+    // is ground truth") — the anchor we verify against is still the
+    // leaf's active self-key, selected just below.
+    mode = 'institutional'
+    registration = {
+      clientId: `urn:overleaf-federation:client:${origin}`,
+      expiresAt: discovery.value.trustChain.expiresAt,
+      trustChainExpiresAt: discovery.value.trustChain.expiresAt,
+    }
+  }
+
   // Active key selection: prefer the EC header kid, fall back to the sole
   // key when there is exactly one.
   const keys = (payload.jwks?.keys ?? []).filter((k) => k && typeof k === 'object')
@@ -213,7 +287,8 @@ async function handlePin(req, res) {
     displayName:
       typeof displayName === 'string' && displayName.length > 0 ? displayName : null,
     entityId: expectedEntityId,
-    mode: 'pairwise',
+    mode,
+    ...(registration ? { registration } : {}),
     anchorJwks: JSON.stringify(candidate),
     kid: candidate.kid,
     thumbprint,
@@ -238,10 +313,11 @@ async function handlePin(req, res) {
     req,
   })
 
-  logger.info({ origin, thumbprint }, 'federation: admin pinned peer (pending)')
+  logger.info({ origin, thumbprint, mode }, 'federation: admin pinned peer (pending)')
   return res.status(201).json({
     origin: peer.origin,
     status: peer.status,
+    mode,
     kid: peer.kid,
     thumbprint: peer.thumbprint,
   })
@@ -332,6 +408,7 @@ async function handleRevoke(req, res) {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(ADMIN_OUTBOUND_FETCH_TIMEOUT_MS),
       })
       peerNotified = resp.ok
     } catch (error) {
@@ -445,6 +522,122 @@ async function handleAuditList(req, res) {
   })
 }
 
+// Institutional trust anchor management (02 §3, 07 §P3). The TA row is
+// the "known-good institutional root": TOFU — the admin pastes the TA's
+// entity id + published JWK set after comparing against the institution's
+// independent publication (thumbprint shown in the listing; 02 §5
+// "public halves only"). Pinned TAs feed `handlePin`'s institutional
+// chain resolve and `createTrustAnchorSetForInstance` (04 §2 additive).
+async function listTrustAnchors(req, res) {
+  const tAs = await FederationTrustAnchor.find({}).sort({ pinnedAt: 1 }).lean()
+  const entries = []
+  for (const ta of tAs) {
+    const keys = Array.isArray(ta.jwks?.keys) ? ta.jwks.keys : []
+    const thumbprints = []
+    for (const key of keys) {
+      try {
+        thumbprints.push(await jwkThumbprint(key))
+      } catch {
+        thumbprints.push(null)
+      }
+    }
+    entries.push({
+      entityId: ta.entityId,
+      displayName: ta.displayName || null,
+      keyKids: keys.map((k) => k?.kid).filter(Boolean),
+      thumbprints,
+      pinnedAt: ta.pinnedAt,
+    })
+  }
+  return res.json({ trustAnchors: entries })
+}
+
+// Pin one institutional TA: validate the entity id (must be an https:
+// OIDF entity id), require a JWK set with only public keys, store the
+// row + audit (federation_trust_anchor_pinned, 04 §8).
+async function handlePinTrustAnchor(req, res) {
+  const { entityId, displayName, jwks } = req.body ?? {}
+  if (typeof entityId !== 'string' || entityId.trim().length === 0) {
+    return res
+      .status(400)
+      .json({ message: 'entityId required', code: 'missing-entity-id' })
+  }
+  const trimmed = entityId.trim()
+  let parsed
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return res
+      .status(400)
+      .json({ message: 'entityId must be an OIDF entity id (https://<FQDN>)', code: 'invalid-entity-id' })
+  }
+  if (parsed.protocol !== 'https:') {
+    return res
+      .status(400)
+      .json({ message: 'entityId must use https:', code: 'invalid-entity-id' })
+  }
+  if (
+    !jwks ||
+    typeof jwks !== 'object' ||
+    !Array.isArray(jwks.keys) ||
+    jwks.keys.length === 0
+  ) {
+    return res
+      .status(400)
+      .json({ message: 'jwks must be a JWK set with a non-empty keys array', code: 'missing-jwks' })
+  }
+  for (const key of jwks.keys) {
+    if (!key || typeof key !== 'object') continue
+    if (key.d !== undefined) {
+      return res
+        .status(400)
+        .json({ message: 'private key material (d) is not accepted', code: 'private-key-rejected' })
+    }
+  }
+  const existing = await FederationTrustAnchor.findOne({ entityId: trimmed }).lean()
+  if (existing) {
+    return res
+      .status(409)
+      .json({ message: `trust anchor ${trimmed} already exists`, code: 'anchor-exists' })
+  }
+  await FederationTrustAnchor.create({
+    entityId: trimmed,
+    displayName:
+      typeof displayName === 'string' && displayName.length > 0 ? displayName : null,
+    jwks,
+  })
+  await audit({
+    operation: AUDIT_TYPES.trustAnchorPinned,
+    projectId: null,
+    meta: { origin: trimmed, direction: 'institutional' },
+    req,
+  })
+  logger.info({ entityId: trimmed }, 'federation: admin pinned institutional trust anchor')
+  return res.status(201).json({ entityId: trimmed, status: 'pinned' })
+}
+
+// Delete one institutional TA. Approved peers that were resolved
+// against it are NOT auto-revoked (04 §5: revocation is an explicit
+// per-peer admin act).
+async function handleDeleteTrustAnchor(req, res) {
+  const { entityId } = req.params
+  const ta = await FederationTrustAnchor.findOne({ entityId }).lean()
+  if (!ta) {
+    return res
+      .status(404)
+      .json({ message: `trust anchor ${entityId} not found`, code: 'anchor-unknown' })
+  }
+  await FederationTrustAnchor.deleteOne({ entityId })
+  await audit({
+    operation: AUDIT_TYPES.peerRevoked,
+    projectId: null,
+    meta: { origin: entityId, direction: 'institutional' },
+    req,
+  })
+  logger.info({ entityId }, 'federation: admin deleted institutional trust anchor')
+  return res.status(204).send('')
+}
+
 export const FederatedAdminController = {
   listPeers: expressify(listPeers),
   handlePin: expressify(handlePin),
@@ -454,6 +647,9 @@ export const FederatedAdminController = {
   handleRotate: expressify(handleRotate),
   listKeys: expressify(handleListKeys),
   auditList: expressify(handleAuditList),
+  listTrustAnchors: expressify(listTrustAnchors),
+  handlePinTrustAnchor: expressify(handlePinTrustAnchor),
+  handleDeleteTrustAnchor: expressify(handleDeleteTrustAnchor),
 }
 
 export default FederatedAdminController

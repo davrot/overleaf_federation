@@ -50,6 +50,10 @@ export const FEDERATED_PRIVILEGES = [
   PrivilegeLevels.REVIEW,
 ]
 
+// S2S budget: assert-level 401 / rate-limit 429 / business 200. An
+// outbound S2S call must never hang the invite form — 10 s cap (06 §7).
+const S2S_FETCH_TIMEOUT_MS = 10000
+
 class PeerRefusal extends Error {
   constructor(code, detail) {
     super(detail || code)
@@ -71,6 +75,7 @@ export async function callPeer(peerOrigin, action, payload) {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(S2S_FETCH_TIMEOUT_MS),
   })
   if (resp.status === 429) {
     throw new PeerRefusal('rate-limited', 'peer rate limit exceeded')

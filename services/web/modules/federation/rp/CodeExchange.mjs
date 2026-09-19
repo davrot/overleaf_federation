@@ -22,12 +22,20 @@ import RedisWrapper from '../../../app/src/infrastructure/RedisWrapper.mjs'
 const JWKS_CACHE_TTL_SECONDS = 3600
 const JWKS_CACHE_PREFIX = 'federation:jwks:'
 
+// Outbound hardening (06 §7): no fetch may hang a visitor's login flow.
+// JWKS is a small JSON blob — 5 s. The token exchange covers the whole
+// B-side OIDC dance — 30 s.
+const JWKS_FETCH_TIMEOUT_MS = 5000
+const TOKEN_FETCH_TIMEOUT_MS = 30000
+
 function getRedis(redis) {
   return redis ?? RedisWrapper.client('federation')
 }
 
 async function fetchAndCacheJwks(redis, origin) {
-  const resp = await fetch(`https://${origin}/federation/oidc/jwks`)
+  const resp = await fetch(`https://${origin}/federation/oidc/jwks`, {
+    signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT_MS),
+  })
   if (!resp.ok) {
     throw new Error(`jwks-fetch-failed: ${resp.status}`)
   }
@@ -109,6 +117,7 @@ export async function exchange(peerOrigin, opts, redis) {
       redirect_uri: `https://${new URL(Settings.siteUrl).hostname}/federation/oidc/rp/callback`,
       code_verifier: opts.codeVerifier,
     }),
+    signal: AbortSignal.timeout(TOKEN_FETCH_TIMEOUT_MS),
   }).then(async r => {
     const body = await r.json().catch(() => ({}))
     if (!r.ok || !body.id_token) {

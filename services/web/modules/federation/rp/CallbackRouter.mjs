@@ -168,8 +168,16 @@ async function handleCallback(req, res) {
     req,
   })
 
-  // ⑧ 302 to the project URL (05 §3.3 step 5).
-  const target = intent.url || '/'
+  // ⑧ 302 to the project URL (05 §3.3 step 5). Open-redirect hardening:
+  //    `intent.url` is owner-set (HMAC-signed state), but the redirect target
+  //    must still be a root-relative path on OUR host - absolute URLs,
+  //    scheme-relative, and backslash forms are refused (browsers normalize
+  //    a leading backslash to a slash, re-forming an absolute URL - the
+  //    classic open-redirect trick), so fall back to '/' on any non-path.
+  let target = intent.url || '/'
+  if (target !== '/' && (target[0] !== '/' || target[1] === '/' || target.includes(String.fromCharCode(92)))) {
+    target = '/'
+  }
   UserSessionsManager.promises
     .trackSession(mirror, req.sessionID, {})
     .catch(err => logger.error({ err }, 'federation: trackSession failed'))

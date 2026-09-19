@@ -19,6 +19,9 @@
 //   GET    /admin/federation/keys                           listKeys
 //   POST   /admin/federation/keys/rotate                    rotateKey
 //   GET    /admin/federation/audit                          auditList
+//   GET    /admin/federation/trust-anchors                  listTrustAnchors
+//   POST   /admin/federation/trust-anchors                  pin institutional TA (TOFU)
+//   DELETE /admin/federation/trust-anchors/:entityId        deleteTrustAnchor
 
 import logger from '@overleaf/logger'
 import AuthorizationMiddleware from '../../../app/src/Features/Authorization/AuthorizationMiddleware.mjs'
@@ -91,6 +94,25 @@ export default {
       FederatedAdminController.auditList,
     )
 
-    logger.debug({}, 'federation: admin router mounted (8 routes)')
+    // Institutional trust anchors (02 §3, 07 §P3): TOFU pin of the
+    // known-good institutional root entity id + JWK set. These feed the
+    // institutional chain resolve at institutional peer-pin time.
+    webRouter.get(
+      '/admin/federation/trust-anchors',
+      adminGuard,
+      FederatedAdminController.listTrustAnchors,
+    )
+    webRouter.post(
+      '/admin/federation/trust-anchors',
+      adminGuard,
+      FederatedAdminController.handlePinTrustAnchor,
+    )
+    webRouter.delete(
+      '/admin/federation/trust-anchors/:entityId',
+      adminGuard,
+      FederatedAdminController.handleDeleteTrustAnchor,
+    )
+
+    logger.debug({}, 'federation: admin router mounted (11 routes)')
   },
 }

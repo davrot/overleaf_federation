@@ -339,3 +339,112 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 | TODO-1fed7e98 | index.mjs mount wiring + start | P0 | **DONE** (committed 2026-09-18b) |
 | TODO-4c7da2af | Settings + app-level auth guards | integration | open |
 | TODO-fd9f09c0 | unit tests + validation gate | testing | **DONE** (60/60 green, ESLint clean) committed 2026-09-18b |
+
+---
+
+## SESSION 5 (this session — hardening + institutional TA + S2S tests + docs)
+
+### DONE this session
+1. **Fetch timeouts** — all outbound `fetch` sites in the module now carry
+   `AbortSignal.timeout`: S2S client (inv/ 10s in `FederatedInviteController.callPeer`),
+   `CodeExchange` token fetch (30s), admin outbound leaf-EC pins
+   (`ADMIN_OUTBOUND_FETCH_TIMEOUT_MS = 10000`), TA-chain `discoverEntity`
+   (`httpTimeoutMs: 10000`), and the S2sRouter-side well-known fetch.
+2. **Redirect hardening** (`rp/CallbackRouter.mjs`) — callback `target`
+   validation: must be a single-root relative path; scheme, `//`, and backslash
+   rejected; fallback to `/`. Backslash written via `String.fromCharCode(92)`
+   (the edit tool mangles escaped backslash lines).
+3. **Institution claim** (`oidc/createProvider.mjs`) — `institution:
+   user.institution || null` (was `|| ''`; the spec field is nullable, not
+   empty-string).
+4. **Institutional TA (P3 pin-time)** —
+   - New model `app/models/FederationTrustAnchor.mjs` (entityId unique,
+     jwks public-half object, displayName, pinnedAt).
+   - Migration `tools/migrations/20260721130000_add_federation_trust_anchor_index.mjs`.
+   - Admin endpoints: `GET/POST /admin/federation/trust-anchors`,
+     `DELETE /admin/federation/trust-anchors/:entityId` (11 routes total now).
+   - Pin-time flow: leaf EC with `authority_hints` AND no TA rows → 400
+     `institutional-anchor-missing` (strict, no pairwise fallback);
+     `discoverEntity(peer, TAs, { httpTimeoutMs: 10000, maxChainDepth: 10 })`
+     → resolves → `mode: 'institutional'` + `registration` subdoc;
+     no-resolution → 400 `institutional-chain-untrusted`; fetch error →
+     400 `institutional-chain-failed`.
+   - `leaf.mjs` passes `authorityHints` to `signEntityConfiguration` when
+     `Settings.federation.institutionAuthorityHints` is non-empty.
+   - `anchors.mjs` updated for institutional anchors; TA private-key material
+     (`key.d`) rejected at pin time.
+   - Runtime S2S path UNCHANGED (pinned-leaf depth-1 — institutional trust is
+     a pin-time decision; runtime S2S verification is depth-1 against the
+     pinned keys).
+5. **S2S router unit tests** — `test/unit/s2s/S2sRouter.test.mjs` (14 cases):
+   ordering off→envelope→peer-lookup→verify→rate-limit→dispatch→audit→respond.
+   Mock strategy: plain functions delegating to `globalThis.__*` thunks (NOT
+   vi.fn — `resetAllMocks` in `test/unit/bootstrap.mjs` erases vi.fn
+   implementations between tests); `vi.mock` of `leaf.mjs` +
+   `ClientAssertionClient.mjs` keeps Mongoose.connect from chaining at import.
+   `FederationPeer` mock: `{ lean: async () => doc }` (chainable).
+6. **READMEs** — module root + `oidf/` `oidc/` `s2s/` `rp/` `invite/` `admin/`
+   `util/` `app/models/` `app/views/` `test/`.
+7. **`ADMIN-GUIDE.md`** — install/boot, peer pin (pairwise + institutional),
+   TA pin, key rotation, invite walkthrough, S2S, troubleshooting, revoke,
+   audit, scope.
+8. **`Settings.federation.institutionAuthorityHints: []`** added to
+   `settings.defaults.js` (default empty, so pairwise stays the default).
+9. **Test totals: 76/76** (6 files: keystore 12 + invite 12 + admin 21 +
+   CodeExchange 7 + State 10 + S2S 14). ESLint `--no-cache --max-warnings 0`
+   clean across module + `app/src/models/User.mjs` +
+   `app/src/models/ProjectInvite.mjs` + `config/settings.defaults.js`.
+   Both migrations pass `node --check`.
+
+### Test/lint commands (canonical)
+```
+cd services/web && ../../node_modules/.bin/vitest run -c vitest.config.js 'federation'
+cd services/web && ../../node_modules/.bin/eslint --no-cache --max-warnings 0 \
+  'modules/federation/**/*.mjs' 'app/src/models/User.mjs' \
+  'app/src/models/ProjectInvite.mjs' 'config/settings.defaults.js'
+node --check tools/migrations/20260721120000_add_federation_indexes.mjs
+node --check tools/migrations/20260721130000_add_federation_trust_anchor_index.mjs
+```
+(The migrations sit in the **repo root** `tools/migrations/`, NOT in
+`services/web/`; ESLint from the root fails with "couldn't find config" —
+always run it from `services/web` for module/config files and `node --check`
+for migrations.)
+
+### Locking this session (LOCKED)
+- **Institutional TA storage** is a SEPARATE model; peer row stays
+  `{ origin, entityId, mode, anchorJwks, kid, anchorThumbprint, status,
+  direction, registration }` (the `mode` + `registration` fields are what
+  this session added in place of the old "P3, not built" note).
+- **`institutional-anchor-missing` / `-chain-failed` / `-chain-untrusted`**
+  are 400s, 400 codes on the admin pin surface, NOT wire codes.
+- **Wire codes** (S2sRouter 200 envelope) unchanged: `invitee-unknown`,
+  `invitee-disabled`, `peer-unknown`, `peer-not-approved`, `rate-limited`,
+  `federation-off`, `replay-jti`.
+- **11 admin routes**, guard `ensureUserIsSiteAdmin` (this fork has no
+  `PermissionsService`; that's from a different fork's design notes and does
+  not apply here).
+- **Timeouts are hardcoded constants** (no settings knob): JWKS fetch 5s,
+  S2S outbound 10s, token 30s, admin pin / TA-chain 10s, PKCE state TTL 120s
+  (session slot + Redis).
+
+### Next (fresh build order)
+1. Two-instance integration: boot A+B in two in-proc apps + fake redis,
+   do a live S2S round-trip for `invited` and `authorize-invite`, and one
+   OIDC code-flow round trip (currently unit-only).
+2. `federation.allowFederatedProjectCreate` (04 §3) — mirror-side
+   project-creation-from-allow-list (still off by default).
+3. Frontend (§3.8 overleaf-cep): invite UI blur hook (`GET preview`),
+   admin UI (peer pin/approve/revoke + TA pin), consent page is pug but the
+   UI for it still needs a browser-visible component wired.
+4. `requireAdminApproval` (04 §3) — mirror-side admin approval queue for
+   federated grants (today `federatedInviteApproved` audit + immediate grant
+   — approval is implicit).
+
+### Commit this session (post-8)
+Commit 9 (this one, `origin/test_federation`): hardening (fetch timeouts,
+redirect guard, `institution: null`) + institutional TA + TA admin
+endpoints + S2S router unit tests + 10 READMEs + `ADMIN-GUIDE.md` +
+`settings.defaults.js` (`institutionAuthorityHints`) + migration
+20260721130000 + HANDOFF update. Explicit `git add` paths only (NEVER
+`git add -A`; `.gitignore` is 4 lines and does not cover `node_modules`
+globally, so `-A` stages every `node_modules/` in the monorepo).
