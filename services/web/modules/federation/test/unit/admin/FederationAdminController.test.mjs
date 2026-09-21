@@ -13,7 +13,17 @@ vi.mock('@overleaf/settings', () => ({
   default: {
     siteUrl: 'https://alpha.example',
     security: { sessionSecret: 'unit-test-secret' },
-    federation: { enabled: true },
+    // getter (vi.mock factories cannot reference module-scope bindings;
+    // globalThis is the sanctioned workaround): per-test __FED_SETTINGS.
+    get federation() {
+      // Default: requireAdminApproval explicitly undefined → treated as ON
+      // by the `!== false` guard (05 §7 default ON v1). Tests that flip the
+      // flag set __FED_SETTINGS with the value they assert against.
+      return (
+        globalThis.__FED_SETTINGS ??
+        { enabled: true, requireAdminApproval: true }
+      )
+    },
   },
 }))
 
@@ -180,6 +190,7 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
     globalThis.__discoverEntity = undefined
     globalThis.__discoverOpts = undefined
     globalThis.__CREATED = undefined
+    globalThis.__FED_SETTINGS = { enabled: true, requireAdminApproval: true }
     globalThis.__KEY_PROVIDER = {
       publishKey: vi.fn(async () => ({})),
       switchActiveKey: vi.fn(async () => ({})),
@@ -267,6 +278,74 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
         'federation_trust_anchor_pinned',
       ])
       expect(auditCalls().at(-1)[0].meta.anchorThumbprint).toBe(thumbprint)
+    })
+
+    it('flag requireAdminApproval OFF (05 §7) → pin auto-approves (skips the queue)', async () => {
+      const { jwkThumbprint } = await import('@oidfed/core')
+      const { signer, publicJwk } = await freshSigner()
+      const ecJwt = await leafEcFor('beta.example', signer, publicJwk)
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => ecJwt,
+      }))
+      globalThis.__FED_SETTINGS = { enabled: true, requireAdminApproval: false }
+      _resetForTest.mockClear()
+
+      const res = mkRes()
+      await Mod.handlePin({ body: { origin: 'beta.example' } }, res)
+
+      expect(res.statuses).toEqual([201])
+      const thumbprint = await jwkThumbprint(publicJwk)
+      // Flag OFF: the row is approved on creation, NOT pending.
+      expect(res.jsonCalls[0]).toEqual({
+        origin: 'beta.example',
+        status: 'approved',
+        mode: 'pairwise',
+        kid: publicJwk.kid,
+        thumbprint,
+        approvedAt: expect.any(Date),
+      })
+      expect(globalThis.__CREATED[0]).toMatchObject({
+        origin: 'beta.example',
+        status: 'approved',
+        approvedAt: expect.any(Date),
+      })
+      // clients[] snapshot rebuild + approval audit fire (mirror the approve endpoint).
+      expect(_resetForTest).toHaveBeenCalled()
+      const ops = auditCalls().map((call) => call[0].operation)
+      expect(ops).toEqual([
+        'federation_peer_registered',
+        'federation_trust_anchor_pinned',
+        'federation_peer_approved',
+      ])
+    })
+
+    it('flag requireAdminApproval ON (default) → pin is pending (queue), no auto-approve', async () => {
+      const { signer, publicJwk } = await freshSigner()
+      const ecJwt = await leafEcFor('beta.example', signer, publicJwk)
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => ecJwt,
+      }))
+      globalThis.__FED_SETTINGS = { enabled: true, requireAdminApproval: true }
+      _resetForTest.mockClear()
+
+      const res = mkRes()
+      await Mod.handlePin({ body: { origin: 'beta.example' } }, res)
+
+      expect(res.statuses).toEqual([201])
+      expect(res.jsonCalls[0].status).toBe('pending')
+      expect(globalThis.__CREATED[0]).toMatchObject({ status: 'pending' })
+      // Queue mode: NO auto-approval side effect on pin (the approve endpoint
+      // performs it, 04 §5).
+      expect(_resetForTest).not.toHaveBeenCalled()
+      const ops = auditCalls().map((call) => call[0].operation)
+      expect(ops).toEqual([
+        'federation_peer_registered',
+        'federation_trust_anchor_pinned',
+      ])
     })
 
     it('leaf EC with authority_hints + no TA configured → 400 institutional-anchor-missing', async () => {

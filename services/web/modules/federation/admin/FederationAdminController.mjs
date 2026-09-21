@@ -299,6 +299,17 @@ async function handlePin(req, res) {
 
   const thumbprint = await jwkThumbprint(candidate)
 
+  // B-side approval queue (04 §2.1, 05 §7 `requireAdminApproval`, default
+  // ON v1): gates whether a received pin lands `pending` (admin must
+  // click approve) or straight-to-`approved`. When the flag is OFF the
+  // pin's TOFU admin action (fetch + click-verify the thumbprint) IS the
+  // approval, so the row skips the queue. Grant minting is refused for a
+  // non-approved peer REGARDLESS of this flag (S2sRouter ③ `peer-not-approved`
+  // + `clients[]` reconstructed only from `approved`, 05 §8.8) — the flag
+  // only controls the queue, never the refusal.
+  const requireApproval = Settings.federation?.requireAdminApproval !== false
+  const initialStatus = requireApproval ? 'pending' : 'approved'
+
   const peer = await FederationPeer.create({
     origin,
     displayName:
@@ -310,7 +321,8 @@ async function handlePin(req, res) {
     kid: candidate.kid,
     thumbprint,
     direction: dir,
-    status: 'pending',
+    status: initialStatus,
+    ...(initialStatus === 'approved' ? { approvedAt: new Date() } : {}),
   })
 
   // Audit (04 §8): `federation_peer_registered` (per-direction pin) +
@@ -330,13 +342,28 @@ async function handlePin(req, res) {
     req,
   })
 
-  logger.info({ origin, thumbprint, mode }, 'federation: admin pinned peer (pending)')
+  if (initialStatus === 'approved') {
+    // Immediate approval (flag OFF): mirror the approve endpoint's side
+    // effects — clients[] snapshot rebuild (05 §8.3) + approval audit row.
+    try {
+      _resetProviderMemo()
+    } catch (error) {
+      logger.warn({ error }, 'federation: provider memo reset failed on immediate-approve')
+    }
+    await audit({ operation: AUDIT_TYPES.peerApproved, projectId: null, meta: { origin }, req })
+  }
+
+  logger.info(
+    { origin, thumbprint, mode, initialStatus },
+    `federation: admin pinned peer (${initialStatus})`,
+  )
   return res.status(201).json({
     origin: peer.origin,
     status: peer.status,
     mode,
     kid: peer.kid,
     thumbprint: peer.thumbprint,
+    ...(initialStatus === 'approved' ? { approvedAt: peer.approvedAt } : {}),
   })
 }
 
