@@ -98,9 +98,10 @@ vi.mock('@oidfed/core', async () => {
   }
 })
 
-vi.mock('../../../oidc/createProvider.mjs', () => ({
-  _resetForTest: vi.fn(),
-}))
+vi.mock('../../../oidc/createProvider.mjs', () => {
+  const reset = vi.fn()
+  return { _resetProviderMemo: reset, _resetForTest: reset }
+})
 
 vi.mock('../../../oidf/ClientAssertionClient.mjs', () => ({
   buildS2sRequest: vi.fn(async (origin, action, payload) => ({
@@ -486,9 +487,13 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
         expect(url).toBe('https://beta.example/federation/s2s')
         return { ok: true, status: 200 }
       })
+      _resetForTest.mockClear()
       const res = mkRes()
       await Mod.handleRevoke({ params: { origin: 'beta.example' } }, res)
       expect(d.save).toHaveBeenCalled()
+      // 04 §5: revocation must invalidate the memoized provider (clients[]
+      // grant minting), not just flip the DB row.
+      expect(_resetForTest).toHaveBeenCalled()
       expect(res.jsonCalls[0]).toMatchObject({
         origin: 'beta.example',
         status: 'revoked',
@@ -513,6 +518,8 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
       await Mod.handleRevoke({ params: { origin: 'beta.example' } }, res)
       expect(res.statuses).toEqual([])
       expect(res.jsonCalls[0].revocation).toBe('peer-notified')
+      // Idempotent double-receipt: no provider reset, no S2S, no audit.
+      expect(_resetForTest).not.toHaveBeenCalled()
       expect(globalThis.fetch).not.toHaveBeenCalled()
       expect(
         auditCalls().filter((c) => c[0].operation === 'federation_peer_revoked'),

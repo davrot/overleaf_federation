@@ -841,3 +841,64 @@ pass.
 - Mark TODO-a9c6dd79 complete.
 
 
+
+---
+
+# SESSION 9 (bug hunt — 2026-09-20 night)
+
+## Scope
+Full security + wire-contract review of the federation module (P0–P1 surface): state /
+code exchange / S2S / OIDC provider / trust anchor / redaction / rate limiting / admin /
+invite / bridge — read-only recon of every `.mjs` under `modules/federation/` (no
+re-read of the plan docs). Findings → `FINDINGS.md` §"Bug hunt".
+
+## Bug hunt findings (all → FINDINGS.md for the record)
+- **(1) P1 — revoked peer retains grant-minting until restart (FIXED this session).**
+  Root cause: the provider-memo reset was only called in the admin `approve` path.
+  Admin `revoke` and S2S `revoke` set `status='revoked'` but the memoized oidc-provider
+  kept serving `clients[]` derived from the pre-revocation snapshot, so a revoked peer
+  could still complete OIDC code exchange (mint grants) until process restart. Fix: all
+  three transition sites (`approve`, admin `revoke`, S2S `revoke`) now invalidate the
+  memo. Production export renamed to `_resetProviderMemo` (05 §8.3 is the
+  contract); the historical `_resetForTest` name is kept as an alias so the
+  existing admin-test import line (unchanged this session) still resolves.
+  The S2S reset fires ONLY on a real write (`res.modifiedCount`) — the
+  idempotent double-receipt no-op path does NOT reset (no double audit, no
+  needless rebuild).
+  Regression tests: `test/unit/s2s/revoke.test.mjs` (3 cases: revoked-transition resets,
+  idempotent double-receipt does NOT reset, third-party origin errors without reset) +
+  admin `handleRevoke` assertions updated (reset called on fresh revoke, NOT called on
+  idempotent no-op).
+- (2) LOW — `verify` JWKS null-guard edge in `ClientAssertionClient` (fetch-then-verify
+  interleaving): if the JWKS fetch fails and verification runs against a null, it throws
+  an unhandled `TypeError` instead of a 401 `signature-verification-failed`. Documented;
+  guard NOT added this session (no failing test, kept the diff minimal — 08 §07.6
+  discipline). Revisit with the next hardening pass.
+- (3) LOW — `Audit.mjs` redaction: `client_assertion` is redacted as a whole but the
+  S2S request also carries `payload` separately — confirm no sensitive fields (email,
+  sub) leak in audit via payload. Confirmed clean (payload fields are
+  origin/invite-ids only).
+- (4) LOW — `State.mjs` one-time state store: state is `consume`d (pop) before use,
+  single-use enforced. No issue.
+- (5) LOW — OIDC key rotation is a 501 stub (documented; provider memo is per-key
+  until rotation lands). No action for P0.
+- (6) INFO — consent form CSRF: the interaction-consent POST is OIDC-provider-internal
+  (provider's own form POST with form field `form_postback`); provider's built-in
+  CSRF token covers it. No app-level CSRF needed. Confirmed.
+
+## Files changed (this session)
+- `oidc/createProvider.mjs` — export `_resetProviderMemo` (production name)
+- `s2s/actions/revoke.mjs` — calls `_resetProviderMemo()` after successful
+  revoked-transition (idempotent path does not reset)
+- `admin/FederationAdminController.mjs` — admin `revoke` resets memo after `peer.save()`
+  (approve unchanged in behavior, import renamed)
+- `test/unit/s2s/revoke.test.mjs` (NEW) — 3 regression tests
+- `test/unit/s2s/S2sRouter.test.mjs` — (NO change; its mock resolves `_resetProviderMemo`
+  via the `_resetForTest` alias kept in `createProvider.mjs`)
+- `test/unit/admin/FederationAdminController.test.mjs` — revoke assertions + reset spy
+- `HANDOFF.md` (this SESSION 9)
+- `FINDINGS.md` — "Bug hunt" section
+
+## Anti-loop discipline (continues)
+- Same closed recon: do NOT re-read `verify.mjs` / `S2sRouter` / `bridge` / `state`.
+- Next session touches only: (a) new failing line, (b) the one source it references.

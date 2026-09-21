@@ -283,3 +283,30 @@ injects it; we merge `OidcProviderRole.metadata` into the leaf EC we serve.
 - ~~`Settings.origin` (not `Settings.siteUrl`)…~~ — **RETRACTED**: `settings.defaults.js`
   defines `siteUrl` and has no `origin` field; entity id derives from
   `new URL(Settings.siteUrl).hostname` (code as committed).
+
+---
+
+## Bug hunt (2026-09-20 night, SESSION 9)
+
+Security + wire-contract review of the whole P0–P1 surface. One P1 fixed (revoke
+provider-memo invalidation, see HANDOFF SESSION 9 + `test/unit/s2s/revoke.test.mjs`).
+Residuals (documented, no code change this session):
+
+- (LOW) `ClientAssertionClient` JWKS null-guard: fetch-fails-then-verify interleaving
+  throws `TypeError` instead of a 401 `signature-verification-failed`.
+- (LOW) `resolveJwk` (rp/CodeExchange): a failing initial JWKS fetch + successful
+  token response leaves `jwks=null`; exchange errors out today, but a null-guard
+  would be cleaner.
+- (LOW) `handlePin` fetch: undici default is `redirect: 'follow'`; a malicious
+  redirect could serve a different EC. Mitigated by `iss`/`sub` validation of the
+  returned EC before pin. Recommend `redirect: 'manual'` next hardening pass.
+- (INFO) OIDC key rotation is a documented 501 stub (provider memo frozen;
+  rotation requires restart).
+- (INFO) Consent-form POST relies on oidc-provider's built-in interaction CSRF
+  token + `op_interaction` cookie; no app-level token needed (standard OIDC).
+- (INFO) `findExistingGrant` always returns null (v1): consent always re-prompted;
+  documented v1 limitation.
+- (INFO) Keystore `expiresAt` on active keys is the publish-time 48h stamp and is
+  never refreshed — cosmetic, no security impact.
+- (INFO) `State.mjs` session slot ("session first, Redis backup" docstring) is
+  written but only Redis is read — nonce + single-use code + 120s TTL still bound.

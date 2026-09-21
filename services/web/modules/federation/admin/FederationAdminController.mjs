@@ -49,7 +49,7 @@ import { expressify } from '@overleaf/promise-utils'
 import { FederationKey } from '../app/models/FederationKey.mjs'
 import { FederationPeer } from '../app/models/FederationPeer.mjs'
 import { FederationTrustAnchor } from '../app/models/FederationTrustAnchor.mjs'
-import { _resetForTest } from '../oidc/createProvider.mjs'
+import { _resetProviderMemo } from '../oidc/createProvider.mjs'
 import { buildS2sRequest } from '../oidf/ClientAssertionClient.mjs'
 import { createKeyProvider } from '../oidf/keystore.mjs'
 import { audit, AUDIT_TYPES } from '../util/Audit.mjs'
@@ -345,7 +345,7 @@ async function handleApprove(req, res) {
   // NEXT oidc-provider request re-constructs with this peer's client in
   // clients[].
   try {
-    _resetForTest()
+    _resetProviderMemo()
   } catch (error) {
     logger.warn({ error }, 'federation: provider memo reset failed')
   }
@@ -413,6 +413,15 @@ async function handleRevoke(req, res) {
       peerNotified = resp.ok
     } catch (error) {
       logger.warn({ error, origin: peer.origin }, 'federation: outbound revoke failed')
+    }
+
+    // 05 §8.3 / 04 §5: a revoked peer must stop minting grants.
+    // Invalidate the memoized provider (clients[] snapshot) so the
+    // transition takes effect without a restart.
+    try {
+      _resetProviderMemo()
+    } catch (error) {
+      logger.warn({ error, origin }, 'federation: provider memo reset failed after revoke')
     }
 
     await audit({

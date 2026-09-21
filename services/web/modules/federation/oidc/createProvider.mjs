@@ -109,6 +109,12 @@ export async function getOidcProvider() {
   return _provider
 }
 
-export function _resetForTest() {
+export function _resetProviderMemo() {
   _provider = null
 }
+
+/**
+ * Test-only alias (vi.mock factories in the unit suite still import the
+ * historical name). Same effect as {@link _resetProviderMemo}.
+ */
+export const _resetForTest = _resetProviderMemo

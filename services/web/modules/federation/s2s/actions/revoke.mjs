@@ -23,6 +23,7 @@
 // returns ok with no double side-effect (the updateOne match filters
 // `status != 'revoked'`).
 import { FederationPeer } from '../../app/models/FederationPeer.mjs'
+import { _resetProviderMemo } from '../../oidc/createProvider.mjs'
 
 import { S2S_ERRORS } from '../../oidf/verify.mjs'
 
@@ -42,10 +43,18 @@ export default async function revoke({ body, callerOrigin }) {
 
   // Mark the sender's row revoked. `status != 'revoked'` in the match
   // makes a double receipt a no-op write (still returns ok below).
-  await FederationPeer.updateOne(
+  const res = await FederationPeer.updateOne(
     { origin: callerOrigin, status: { $ne: 'revoked' } },
     { status: 'revoked' },
   )
+
+  // 05 §8.3 / 04 §5: a revoked peer must stop minting grants. The
+  // oidc-provider `clients[]` is a memoized snapshot (clients.mjs), so
+  // invalidate it on the transition — a real write (matchedCount / modified
+  // Count) only, NOT on the idempotent double-receipt no-op path.
+  if (res.modifiedCount) {
+    _resetProviderMemo()
+  }
 
   return { ok: true, payload: {} }
 }
