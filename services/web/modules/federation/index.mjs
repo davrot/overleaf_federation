@@ -45,6 +45,7 @@ import {
   listPublicKeys,
   leafJwksPayload,
 } from './oidf/keystore.mjs'
+import ProjectCreationGuard from './app/ProjectCreationGuard.mjs'
 
 export default {
   nonCsrfRouter: {
@@ -92,6 +93,13 @@ export default {
 
       // ⑤ Admin routes (PEER pin/approve/deny/revoke, key rotate, audit).
       FederatedAdminRouter.apply(webRouter)
+
+      // ⑥ Partner-side project-creation gate (01 §3.4, 05 §7
+      //    allowFederatedProjectCreate, default OFF): mirrors only
+      //    create when the partner admin enabled it. Mounted BEFORE
+      //    core `POST /project/new` (Router.initialize registers it
+      //    after this apply call). Idempotent (applyRouter runs x3).
+      ProjectCreationGuard(webRouter)
     },
   },
 
