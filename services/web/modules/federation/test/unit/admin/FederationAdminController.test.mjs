@@ -140,6 +140,8 @@ vi.mock('../../../util/Audit.mjs', () => ({
     peerRegistered: 'federation_peer_registered',
     peerApproved: 'federation_peer_approved',
     peerRevoked: 'federation_peer_revoked',
+    peerDenied: 'federation_peer_denied',
+    trustRevoked: 'federation_peer_trust_revoked',
     trustAnchorPinned: 'federation_trust_anchor_pinned',
     keyRotated: 'federation_key_rotated',
   },

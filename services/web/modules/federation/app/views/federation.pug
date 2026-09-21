@@ -1,0 +1,340 @@
+doctype html
+html(lang='en')
+	head
+		meta(charset='utf-8')
+		meta(name='federation' content='admin')
+		meta(name='fed-csrf' content=csrfToken)
+		title Federation admin — #{siteName || 'Overleaf'}
+		style
+			| body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; background: #f6f7f9; color: #232629; margin: 0; padding: 24px; }
+			| h1 { font-size: 1.5rem; margin: 0 0 4px; }
+			| .sub { color: #6a7481; margin: 0 0 24px; }
+			| section { background: #fff; border: 1px solid #e1e6ea; border-radius: 8px; padding: 18px 20px; margin-bottom: 20px; }
+			| h2, h3 { font-size: 1.08rem; margin: 0 0 4px; }
+			| .hint { color: #6a7481; font-size: 0.85rem; margin: 0 0 12px; font-family: ui-monospace, monospace; }
+			| table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+			| th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #eef0f2; vertical-align: top; }
+			| button { padding: 4px 10px; font-size: 0.82rem; border: 1px solid #d1d7dd; border-radius: 5px; background: #fff; color: #232629; cursor: pointer; }
+			| button:hover { background: #f6f7f9; }
+			| button:disabled { opacity: 0.5; cursor: default; }
+			| button.danger { color: #b3403b; }
+			| form { margin: 6px 0 4px; }
+			| form input { padding: 5px 8px; border: 1px solid #d1d7dd; border-radius: 5px; font-size: 0.85rem; width: 55%; }
+			| .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.78rem; }
+			| .badge.ok { background: #e6f4ea; color: #1e7e58; }
+			| .badge.no { background: #fbe7e6; color: #b3403b; }
+			| .badge.mid { background: #fff4d6; color: #93600d; }
+			| .wizard { border: 2px solid #e1d6ff; background: #faf8ff; border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; }
+			| .wizard-item { padding: 4px 0; font-size: 0.9rem; }
+			| .wizard-item.done { color: #1e7e58; }
+			| #wizard-result { font-weight: 600; }
+	h1 Federation
+	p.sub
+		| #{siteName || ''} — identity federation (v1: identity federation only, no content).
+	.wizard
+		h2 Setup wizard
+		p.hint GET /admin/federation/wizard — probes are read-only; timeouts come from Settings.
+		em(id='wizard-result') (probe not run yet)
+		ul(id='wizard-list' style='list-style:none; padding:0; margin:10px 0 12px;')
+		button Run readiness probe
+		#s2s-note.hint
+			| federation.s2sFetchTimeoutMs = #{ settings.s2sFetchTimeoutMs } ms (default 10000)
+		h3 Effective settings
+		ul(id='settings-list', style='list-style:none; padding:0')
+		p(class='err' id='wizard-err')
+	section
+		h2 Peers (pairwise pin, 02 §3 TOFU)
+		p.hint POST /admin/federation/peers — leaf discovered at pin time, stored as thumbprint.
+		form(id='pin-peer-form')
+			input(type='url' id='peer-origin' placeholder='origin.example' required)
+			button(id='peer-pin') Pin leaf
+		p.hint(style='font-family:inherit')
+			| pending = pinned, awaiting approval | approved = usable | revoked = trust cut
+		table(id='peers-table')
+			tbody
+		p(class='err' id='peers-err')
+	section
+		h2 Identity keys (federation + oidc, 02 §5)
+		p.hint Rotation publishes a new active key (02 §5); old key enters
+		| 14-day grace window and is swept at next start.
+		button(id='rotate-key') Rotate federation key
+		table(id='keys-table')
+			tbody
+		p(class='err' id='keys-err')
+	section
+		h2 Institutional trust anchors (02 §3.2)
+		p.hint Pin the known-good institutional root entity (TOFU).
+		form(id='anchor-form')
+			input(type='text' id='anchor-entity' placeholder='urn:entity:institutional:example' required)
+			button(id='anchor-pin') Pin anchor
+		table(id='anchors-table')
+			tbody
+		p(class='err' id='anchors-err')
+	section
+		h2 Audit (federation rows, newest first, max 200)
+		p.hint S2S assertion meta is hashed (03 §6); raw JWS is never stored.
+		table(id='audit-table')
+			tbody
+		p(class='err' id='audit-err')
+	script(nonce=scriptNonce type='text/javascript').
+		var BASE = '/admin/federation'
+
+		function csrf() {
+			var meta = document.querySelector('meta[name="fed-csrf"]')
+			return meta ? meta.getAttribute('content') : ''
+		}
+
+		function el(tag, text) {
+			var node = document.createElement(tag)
+			if (text !== undefined && text !== null) node.textContent = String(text)
+			return node
+		}
+
+		function err(elId, message) {
+			var n = document.getElementById(elId)
+			if (n) n.textContent = message
+		}
+
+		function emptyNote(tbody) {
+			var tr = el('tr')
+			tr.appendChild(el('td', '— none —'))
+			tbody.appendChild(tr)
+		}
+
+		async function post(path, body) {
+			var response = await fetch(BASE + path, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(Object.assign({ _csrf: csrf() }, body)),
+			})
+			var text = await response.text()
+			if (!response.ok) {
+				throw new Error(response.status + (text ? ': ' + text : ''))
+			}
+			return text ? JSON.parse(text) : null
+		}
+
+		function deletePath(path) {
+			return fetch(BASE + path, {
+				method: 'DELETE',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ _csrf: csrf() }),
+			})
+		}
+
+		async function loadPeers() {
+			var tbody = document.querySelector('#peers-table tbody')
+			try {
+				var response = await fetch(BASE + '/peers')
+				var data = await response.json()
+				tbody.textContent = ''
+				if (!data.peers || data.peers.length === 0) {
+					emptyNote(tbody)
+					return
+				}
+				data.peers.forEach(function (peer) {
+					var tr = el('tr')
+					tr.appendChild(el('td', peer.origin))
+					var badge = el('span', peer.status)
+					badge.className = 'badge ' +
+						(peer.status === 'approved' ? 'ok'
+							: peer.status === 'pending' ? 'mid' : 'no')
+					var statusTd = el('td')
+					statusTd.appendChild(badge)
+					tr.appendChild(statusTd)
+					tr.appendChild(el('td', peer.displayName || peer.entityId || peer.direction || ''))
+					var actionsTd = el('td')
+					var actions = el('div')
+					if (peer.status === 'pending') {
+						var approve = el('button', 'Approve')
+						approve.addEventListener('click', function () {
+							post(BASE + '/peers/' + encodeURIComponent(peer.origin) + '/approve', {})
+								.then(loadPeers)
+								.catch(function (er) {
+									err('peers-err', 'Approve failed: ' + (er && er.message ? er.message : er))
+								})
+						})
+						actions.appendChild(approve)
+						var deny = el('button', 'Deny')
+						deny.className = 'danger'
+						deny.addEventListener('click', function () {
+							deletePath(BASE + '/peers/' + encodeURIComponent(peer.origin))
+								.then(loadPeers)
+								.catch(function (er) {
+									err('peers-err', 'Deny failed: ' + (er && er.message ? er.message : er))
+								})
+						})
+						actions.appendChild(deny)
+					} else if (peer.status === 'approved') {
+						var revoke = el('button', 'Revoke')
+						revoke.className = 'danger'
+						revoke.addEventListener('click', function () {
+							post(BASE + '/peers/' + encodeURIComponent(peer.origin) + '/revoke', {})
+								.then(loadPeers)
+								.catch(function (er) {
+									err('peers-err', 'Revoke failed: ' + (er && er.message ? er.message : er))
+								})
+						})
+						actions.appendChild(revoke)
+					}
+					actionsTd.appendChild(actions)
+					tr.appendChild(actionsTd)
+					tbody.appendChild(tr)
+				})
+			} catch (er) {
+				err('peers-err', 'List peers failed: ' + (er && er.message ? er.message : er))
+			}
+		}
+
+		async function loadKeys() {
+			var tbody = document.querySelector('#keys-table tbody')
+			try {
+				var response = await fetch(BASE + '/keys')
+				var data = await response.json()
+				tbody.textContent = ''
+				if (!data.keys || data.keys.length === 0) {
+					emptyNote(tbody)
+					return
+				}
+				data.keys.forEach(function (k) {
+					var tr = el('tr')
+					tr.appendChild(el('td', k.purpose))
+					tr.appendChild(el('td', k.kid))
+					tr.appendChild(el('td', k.state))
+					tr.appendChild(el('td',
+						k.expiresAt ? new Date(k.expiresAt * 1000).toLocaleDateString() : '—'))
+					tbody.appendChild(tr)
+				})
+			} catch (er) {
+				err('keys-err', 'List keys failed: ' + (er && er.message ? er.message : er))
+			}
+		}
+
+		async function loadAnchors() {
+			var tbody = document.querySelector('#anchors-table tbody')
+			try {
+				var response = await fetch(BASE + '/trust-anchors')
+				var data = await response.json()
+				tbody.textContent = ''
+				if (!data.anchors || data.anchors.length === 0) {
+					emptyNote(tbody)
+					return
+				}
+				data.anchors.forEach(function (a) {
+					var tr = el('tr')
+					tr.appendChild(el('td', a.entityId))
+					tr.appendChild(el('td',
+						a.publishedAt ? new Date(a.publishedAt * 1000).toLocaleDateString() : '—'))
+					var deleteBtn = el('button', 'Delete')
+					deleteBtn.className = 'danger'
+					deleteBtn.addEventListener('click', function () {
+						deletePath(BASE + '/trust-anchors/' + encodeURIComponent(a.entityId))
+							.then(loadAnchors)
+							.catch(function (er) {
+								err('anchors-err', 'Delete anchor failed: ' +
+									(er && er.message ? er.message : er))
+							})
+					})
+					var btnTd = el('td')
+					btnTd.appendChild(deleteBtn)
+					tr.appendChild(btnTd)
+					tbody.appendChild(tr)
+				})
+			} catch (er) {
+				err('anchors-err', 'List anchors failed: ' + (er && er.message ? er.message : er))
+			}
+		}
+
+		async function loadAudit() {
+			var tbody = document.querySelector('#audit-table tbody')
+			try {
+				var response = await fetch(BASE + '/audit?limit=200')
+				var data = await response.json()
+				tbody.textContent = ''
+				var entries = data.entries || []
+				if (entries.length === 0) {
+					emptyNote(tbody)
+					return
+				}
+				entries.forEach(function (e) {
+					var tr = el('tr')
+					tr.appendChild(el('td',
+						e.timestamp ? new Date(e.timestamp).toLocaleString() : '—'))
+					tr.appendChild(el('td', e.operation))
+					tr.appendChild(el('td', e.initiatorId || '—'))
+					tr.appendChild(el('td', e.meta && (e.meta.origin || '') || e.origin || ''))
+					tbody.appendChild(tr)
+				})
+			} catch (er) {
+				err('audit-err', 'List audit failed: ' + (er && er.message ? er.message : er))
+			}
+		}
+
+		async function loadWizard() {
+			try {
+				var response = await fetch(BASE + '/wizard')
+				var status = await response.json()
+				document.getElementById('wizard-result').textContent =
+					status.ok ? 'READY (all 5 steps complete)' : 'NOT READY'
+				var ul = document.getElementById('wizard-list')
+				ul.textContent = ''
+				status.steps.forEach(function (step) {
+					var li = el('li',
+						(step.done ? '✓' : '○') + ' ' + step.label + ': ' + step.detail)
+					li.className = step.done ? 'wizard-item done' : 'wizard-item'
+					ul.appendChild(li)
+				})
+				var sl = document.getElementById('settings-list')
+				sl.textContent = ''
+				sl.appendChild(el('li', 'enabled: ' + status.settings.enabled))
+				sl.appendChild(el('li',
+					'requireAdminApproval: ' + status.settings.requireAdminApproval))
+				sl.appendChild(el('li',
+					'allowFederatedProjectCreate: ' + status.settings.allowFederatedProjectCreate))
+			} catch (er) {
+				err('wizard-err', 'Wizard probe failed: ' + (er && er.message ? er.message : er))
+			}
+		}
+
+		document.addEventListener('DOMContentLoaded', function () {
+			document.querySelector('.wizard > button')
+				.addEventListener('click', loadWizard)
+
+			document.getElementById('peer-pin')
+				.addEventListener('click', function () {
+					var origin = document.getElementById('peer-origin').value
+					post(BASE + '/peers', { origin: origin })
+						.then(loadPeers)
+						.catch(function (er) {
+							document.getElementById('peer-origin').value = ''
+							err('peers-err', 'Pin failed: ' + (er && er.message ? er.message : er))
+						})
+				})
+
+			document.getElementById('rotate-key')
+				.addEventListener('click', function () {
+					post(BASE + '/keys/rotate', { purpose: 'federation' })
+						.then(loadKeys)
+						.catch(function (er) {
+							err('keys-err', 'Rotate failed: ' + (er && er.message ? er.message : er))
+						})
+				})
+
+			document.getElementById('anchor-pin')
+				.addEventListener('click', function () {
+					var entityId = document.getElementById('anchor-entity').value
+					post(BASE + '/trust-anchors', { entityId: entityId })
+						.then(loadAnchors)
+						.catch(function (er) {
+							document.getElementById('anchor-entity').value = ''
+							err('anchors-err',
+								'Pin anchor failed: ' + (er && er.message ? er.message : er))
+						})
+				})
+
+			loadPeers()
+			loadKeys()
+			loadAnchors()
+			loadAudit()
+			loadWizard()
+		})

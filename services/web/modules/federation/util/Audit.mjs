@@ -31,6 +31,8 @@
 //        entity id, 02 §3)
 //     federation_key_rotated
 //       (per key-set; kid + old/new state, 02 §5)
+//     federation_peer_denied
+//       (pairwise TOFU: admin denied a pending registration)
 
 import logger from '@overleaf/logger'
 import { ProjectAuditLogEntry } from '../../../app/src/models/ProjectAuditLogEntry.mjs'
@@ -107,6 +109,7 @@ export const AUDIT_TYPES = {
   trustAnchorPinned: 'federation_trust_anchor_pinned',
   trustRevoked: 'federation_peer_trust_revoked',
   keyRotated: 'federation_key_rotated',
+  peerDenied: 'federation_peer_denied',
   // project-scoped
   inviteApproved: 'federated_invite_approved',
   inviteDenied: 'federated_invite_denied',

@@ -30,10 +30,36 @@ The app-level middleware mounts, on enable:
 - `GET /federation/federation-keys` — public key listing (for admin
   browser/tooling).
 
-Indexes: migrations run from the **repo root** via
+```
+
+Indices: migrations run from the **repo root** via
 `yarn workspace @overleaf/migrations up` (or the tooling in `tools/migrations/`
 `package.json`); the two `20260721*` files create
 `FederationPeer.origin`, `FederationPeer.status`, `FederationTrustAnchor.entityId`.
+
+**Recommended path (0fa0f9f3+):** the admin dashboard at
+`GET /admin/federation` covers §2–§4 in one browser session (readiness
+wizard + peer/key/anchor/audit panels, all CSRF-protected). The `curl` steps
+below remain as the wire reference for debugging; use the dashboard first,
+curl when something fails. A site-admin logs in and opens the page.
+
+## 1.5. Admin dashboard (`GET /admin/federation`)
+
+Site-admin only. One standalone page (no SPA build); five panels:
+
+- **Setup wizard** — run the readiness probe (5 steps, all read-only):
+  module enabled → federation key active → first peer approved → own leaf
+  served (bounded loopback fetch) → recent federation audit row.
+- **Peers** — pin / approve / deny / revoke (pairwise TOFU, both directions).
+- **Identity keys** — list `federation` + `oidc` keys, rotate (local, 02 §5).
+- **Trust anchors** — pin / delete institutional anchors (02 §3.2).
+- **Audit** — last 200 `federation_*` rows (hashed meta, 03 §6).
+
+Effective settings (enabled, `requireAdminApproval`,
+`allowFederatedProjectCreate`, `keyRotationGraceDays`, `s2sFetchTimeoutMs`)
+are shown in the wizard panel after a probe, read from `Settings` with the
+same defaults the runtime uses — so the admin sees the *live* configuration,
+not what they think they set.
 
 ## 2. Verify the leaf is healthy
 

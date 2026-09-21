@@ -22,11 +22,16 @@
 //   GET    /admin/federation/trust-anchors                  listTrustAnchors
 //   POST   /admin/federation/trust-anchors                  pin institutional TA (TOFU)
 //   DELETE /admin/federation/trust-anchors/:entityId        deleteTrustAnchor
+//
+//   Dashboard (view-only; the page powers the wizard + panels above):
+//     GET    /admin/federation                              federationAdminPage
+//     GET    /admin/federation/wizard                       federationWizard
 
 import logger from '@overleaf/logger'
 import AuthorizationMiddleware from '../../../app/src/Features/Authorization/AuthorizationMiddleware.mjs'
 
 import FederatedAdminController from './FederationAdminController.mjs'
+import FederationWizardController from './FederationWizardController.mjs'
 
 export default {
   /**
@@ -113,6 +118,20 @@ export default {
       FederatedAdminController.handleDeleteTrustAnchor,
     )
 
-    logger.debug({}, 'federation: admin router mounted (11 routes)')
+    logger.debug({}, 'federation: admin router mounted (13 routes)')
+
+    // --- Admin dashboard (0fa0f9f3) ---
+    // The single admin page for federation: setup wizard (read-only
+    // readiness probe JSON) + CRUD panels wired to the REST routes above.
+    webRouter.get(
+      '/admin/federation',
+      adminGuard,
+      FederationWizardController.federationAdminPage,
+    )
+    webRouter.get(
+      '/admin/federation/wizard',
+      adminGuard,
+      FederationWizardController.federationWizard,
+    )
   },
 }

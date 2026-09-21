@@ -414,7 +414,7 @@ async function handleDeny(req, res) {
   }
   await FederationPeer.deleteOne({ origin })
   await audit({
-    operation: AUDIT_TYPES.peerRegistered,
+    operation: AUDIT_TYPES.peerDenied,
     projectId: null,
     meta: { origin, direction: peer.direction },
     req,
@@ -697,7 +697,7 @@ async function handleDeleteTrustAnchor(req, res) {
   }
   await FederationTrustAnchor.deleteOne({ entityId })
   await audit({
-    operation: AUDIT_TYPES.peerRevoked,
+    operation: AUDIT_TYPES.trustRevoked,
     projectId: null,
     meta: { origin: entityId, direction: 'institutional' },
     req,
