@@ -4,13 +4,16 @@
 // This module does the two halves around that 302:
 //
 //   initiation:  generate verifier + challenge S256, nonce;
-//                persist { state, verifier, intent } in the owner's
-//                express-session AND a short Redis backup (TTL 120 s —
-//                survives cookie expiry across tabs, 05 §3.1);
+//                persist the HMAC-signed intent in Redis as the single
+//                read source (TTL 120 s — survives cookie expiry across
+//                tabs, 05 §3.1), and mirror it into the owner's express
+//                session as a CLEANUP MIRROR only (deleted on callback);
 //                build B's authorization URL.
 //
-//   callback:    read + DELETE the single-use verifier (session row
-//                first, Redis backup fallback); verify the HMAC-signed
+//   callback:    read + DELETE the single-use verifier from Redis
+//                (the session slot is NOT a read source — callback may
+//                land on another replica where the session rows differs);
+//                verify the HMAC-signed
 //                `state` (the intent, never a raw secret).
 //
 // Security (06 §3): no client secret anywhere (public client + PKCE);

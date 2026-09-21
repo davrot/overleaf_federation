@@ -310,3 +310,38 @@ Residuals (documented, no code change this session):
   never refreshed — cosmetic, no security impact.
 - (INFO) `State.mjs` session slot ("session first, Redis backup" docstring) is
   written but only Redis is read — nonce + single-use code + 120s TTL still bound.
+
+---
+
+## Shared-client-row analysis (B4 — worth writing down, zero code)
+
+Question: is the "shared provider-memo across all approved peers" a grant-
+forging hole? **No — bounded, by oidc-provider v9's own mint gating.** The
+shared memo holds ONE provider instance whose `clients[]` is the live
+reconstruction from `approved` peers (04 §7). Each mint is bound to:
+
+1. **A live `clients[]` row** for the minting origin. oidc-provider v9
+   mint-gates on `client_id` membership in `clients[]` — a revoked peer's
+   row is removed by the SESSION 9 P1 fix (memo invalidation on
+   transition), so its next mint (and every mint after) is
+   `invalid_client` from the token endpoint, regardless of cookie or
+   session state.
+2. **PKCE public client, no secret** (`token_endpoint_auth_method: 'none'`)
+   on every row — a forged `client_id` for a revoked origin is still not
+   in `clients[]`, so membership is the whole gate (there is no secret to
+   steal). A validly-PKCE'd request for a *non-removed* origin cannot be
+   attributed to a revoked origin because the client_id string encodes
+   the origin (`urn:overleaf-federation:client:<origin>`).
+
+The OIDF **client assertion** (S2S wire, `iss`/`aud`/signature checked
+against the pinned anchor JWK, `verify.mjs` 02 §3) and the **OIDC
+mint** (PKCE `clients[]` membership) are two separate enforcement layers:
+control-plane S2S vs token-plane mint. Defense in depth — a revoked
+origin fails the S2S `peer-not-approved` (pre-lookup, S2sRouter ③)
+AND the OIDC `invalid_client` (memo reset) independently.
+
+Residual (not a hole, recorded): pre-revoke **codes already minted**
+redeem until their 120 s TTL (the `killOutstandingCodes` NO-OP, 04 §5).
+That is the *only* true post-revoke residual and it is a bounded 120 s
+window (AuthorizationCode TTL, single-use per 05 §8.2), never a grant
+secret. This is what `TODO-e652c0d9`'s sweep would close.
