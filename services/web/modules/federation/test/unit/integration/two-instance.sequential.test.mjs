@@ -334,6 +334,20 @@ function makeFakeRedis() {
     async smembers(k) {
       return [...(sets.get(k) ?? [])]
     },
+    // Test-only enumeration (ioredis KEYS with prefix match) — the
+    // production adapter never calls keys(); the sweep test uses it to
+    // assert which docs survive.
+    async keys(pattern) {
+      const keys = []
+      for (const k of kv.keys()) {
+        if (pattern === '*') keys.push(k)
+        else if (pattern.endsWith('*')) {
+          const prefix = pattern.slice(0, -1)
+          if (k.startsWith(prefix)) keys.push(k)
+        } else if (k === pattern) keys.push(k)
+      }
+      return keys
+    },
     async flushall() {
       kv.clear()
       tlls.clear()
@@ -736,9 +750,15 @@ test('S2S bad signature → 401 bad-signature', async () => {
   const built = await buildS2sRequest('beta.example', 'invited', {
     invitee: { origin: 'beta.example', localName: 'alice@beta.example' },
   })
-  // Tamper the last char of the JWT signature segment.
+  // Tamper the JWT signature segment. A 64-byte ES256 signature ends in
+  // '='/'=' padding, so the LAST base64 char holds only the low 2 bits
+  // of the second-to-last byte (values 0-3, chars A-D); a naive swap
+  // there can decode to identical bits (e.g. 'B'->'x'). Flip A<->B
+  // instead: bit 0 of the low byte always flips, so the signature
+  // changes with probability 1.
   const a = built.headers.client_assertion
-  const bad = a.slice(0, -1) + (a.slice(-1) === 'x' ? 'y' : 'x')
+  const last = a.slice(-1)
+  const bad = a.slice(0, -1) + (last === 'A' ? 'B' : last === 'D' ? 'C' : 'A')
   const res = await postS2s({ ...built, headers: { ...built.headers, client_assertion: bad } })
   expect(res.status).toBe(401)
   const data = await res.json()
@@ -801,6 +821,71 @@ test('S2S rate limit: budget exceeded → 429 + Allow-Retry-After', async () => 
   expect(first429).toBeLessThanOrEqual(31)
   expect(lastData.code).toBe('rate-limited')
   expect(lastRes.headers.get('Allow-Retry-After')).toBeTruthy()
+})
+
+// ── 11a: S2S revoke with `killOutstandingCodes` (04 §5 / 06 §178) ──────
+test('S2S revoke + flag ON: outstanding codes swept, sessions + grants survive (not over-cross)', async () => {
+  // Fresh dance: mint a real code (and, on token-exchange, access/refresh
+  // tokens) via the REAL adapter, so the client SET index is populated
+  // from production paths.
+  Settings.federation.enabled = true
+  const res0 = await runAuthorize()
+  const dance = await driveDance(res0.location)
+  expect(dance.code).toBeTruthy()
+
+  const clientId = 'urn:overleaf-federation:client:beta.example'
+  const clientSet = `federation:oidc:client:${clientId}`
+  const redis = globalThis.__REDIS
+
+  // Sanity: the dance minted token docs for this client.
+  const beforeCodes = await redis.smembers(clientSet)
+  expect(beforeCodes.length).toBeGreaterThanOrEqual(1)
+  expect(
+    beforeCodes.some(k => k.startsWith('federation:oidc:AuthorizationCode:')),
+  ).toBe(true)
+  const beforeSessions = await redis.keys('federation:oidc:Session:*')
+  expect(beforeSessions.length).toBeGreaterThanOrEqual(1)
+  const beforeSubs = await redis.keys('federation:oidc:sub:*')
+  expect(beforeSubs.length).toBeGreaterThanOrEqual(1)
+  const beforeGrants = await redis.keys('federation:oidc:Grant:*')
+
+  // Flip the peer row flag ON (the admin page / API surfaces this in a
+  // later goal; the row shape is the same).
+  globalThis.__PEERS[0].killOutstandingCodes = true
+
+  // S2S revoke from the peer (single-origin test: A→B on beta.example).
+  const built = await buildS2sRequest('beta.example', 'revoke', {})
+  const res = await postS2s(built)
+  expect(res.status).toBe(200)
+  expect(await res.json()).toEqual({ ok: true, payload: {} })
+  expect(globalThis.__PEERS[0].status).toBe('revoked')
+
+  // 04 §5: every outstanding code / token doc for the revoked client is
+  // destroyed.
+  const afterCodes = await redis.smembers(clientSet)
+  expect(afterCodes).toEqual([])
+  for (const docKey of beforeCodes) {
+    expect(await redis.get(docKey)).toBeNull()
+  }
+
+  // 06 §178 not over-cross: B-side sessions are NOT logged out by A's
+  // admin — the Session doc and its sub-index survive the sweep.
+  const afterSessions = await redis.keys('federation:oidc:Session:*')
+  expect(afterSessions).toEqual(beforeSessions)
+  const afterSubs = await redis.keys('federation:oidc:sub:*')
+  expect(afterSubs).toEqual(beforeSubs)
+
+  // 06 §174: the consent Grant doc is not swept (sweep is GRANTABLE
+  // token models only; v9 Grant extends BaseToken and carries `clientId`
+  // in its payload — exclusion is by the model gate in the adapter).
+  const afterGrants = await redis.keys('federation:oidc:Grant:*')
+  expect(afterGrants).toEqual(beforeGrants)
+
+  // Re-approve so test 11 exercises its OWN fresh revoked transition
+  // (this one already consumed the fresh transition + trustRevoked audit
+  // + sweep side effect for its assertions above).
+  globalThis.__PEERS[0].status = 'approved'
+  delete globalThis.__PEERS[0].killOutstandingCodes
 })
 
 // ── 11: S2S revoke (trust revoked, idempotent, follow-up refused) ────────────

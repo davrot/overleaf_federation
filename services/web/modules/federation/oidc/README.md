@@ -18,6 +18,20 @@ bridge below (provider's built-in dev interactions are disabled).
 | `clients.mjs` | `buildOidcProviderClients()` — one RP client per **approved** peer (`urn:overleaf-federation:client:<origin>`, `tn:oidc` client-auth, `jwks` = the peer's pinned `anchorJwks`). |
 | `RedisOidcProviderAdapter.mjs` | `oidc-provider` Models backed by Redis (interaction, session, code, user-code, authorization, grant). Key prefix `federation:oidc:*`. |
 
+### Redis key layout (all under `federation:oidc:*`)
+| Key | Type | Content |
+|---|---|---|
+| `federation:oidc:<Model>:<id>` | string (JSON) | every persisted model doc (code, tokens, Session, Interaction, Grant, …) |
+| `federation:oidc:sub:<uid>` | string | the Session id for `findByUid` (Session-only sub-index) |
+| `federation:oidc:usercode:<code>` | string | the DeviceCode id for `findByUserCode` (CIBA off, kept for v9 routing) |
+| `federation:oidc:grant:<grantId>` | SET of doc keys | token docs minted under one consent Grant (`revokeByGrantId` cascade) |
+| `federation:oidc:client:<clientId>` | SET of doc keys | token docs minted for one client (`killOutstandingCodes` sweep, 04 §5) |
+
+The two SETs are trimmed on every `destroy`/`revokeByGrantId` (and reclaimed
+on their last member by real Redis); the client SET's GRANTABLE gate (token
+models, never `Grant`) is what keeps the sweep from over-crossing into B's
+sessions and into the consent record (06 §174/§178).
+
 ### Interaction flow (B receives A's code request)
 ```
 A redirects user → B /federation/oidc/auth

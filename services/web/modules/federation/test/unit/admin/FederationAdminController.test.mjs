@@ -103,6 +103,16 @@ vi.mock('../../../oidc/createProvider.mjs', () => {
   return { _resetProviderMemo: reset, _resetForTest: reset }
 })
 
+// The code-sweep entry point is spied (flag-ON test); no Redis access
+// in this unit pass.
+vi.mock('../../../oidc/RedisOidcProviderAdapter.mjs', async (importOriginal) => {
+  const mod = await importOriginal()
+  return {
+    ...mod,
+    revokeClientCodes: vi.fn(async () => 0),
+  }
+})
+
 vi.mock('../../../oidf/ClientAssertionClient.mjs', () => ({
   buildS2sRequest: vi.fn(async (origin, action, payload) => ({
     headers: { client_assertion: 'jwt-assertion' },
@@ -153,6 +163,7 @@ vi.mock('../../../../../app/src/models/ProjectAuditLogEntry.mjs', () => ({
 import { FederationPeer } from '../../../app/models/FederationPeer.mjs'
 import { audit } from '../../../util/Audit.mjs'
 import { _resetForTest } from '../../../oidc/createProvider.mjs'
+import { revokeClientCodes } from '../../../oidc/RedisOidcProviderAdapter.mjs'
 
 import FederatedAdminController from '../../../admin/FederationAdminController.mjs'
 
@@ -524,6 +535,63 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
       expect(
         auditCalls().filter((c) => c[0].operation === 'federation_peer_revoked'),
       ).toHaveLength(0)
+    })
+
+    it('revoke: flag ON (killOutstandingCodes) → provider memo reset AND code sweep, still peer-notified', async () => {
+      const d = {
+        origin: 'beta.example',
+        status: 'approved',
+        approvedAt: new Date(),
+        save: vi.fn(),
+        killOutstandingCodes: true,
+      }
+      globalThis.__PEERS = { 'beta.example': d }
+      globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }))
+      _resetForTest.mockClear()
+      revokeClientCodes.mockClear()
+      const res = mkRes()
+      await Mod.handleRevoke({ params: { origin: 'beta.example' } }, res)
+      expect(_resetForTest).toHaveBeenCalled()
+      expect(revokeClientCodes).toHaveBeenCalledTimes(1)
+      expect(revokeClientCodes.mock.calls[0][0]).toBe(
+        'urn:overleaf-federation:client:beta.example',
+      )
+      expect(res.jsonCalls[0].revocation).toBe('peer-notified')
+    })
+
+    it('revoke: flag OFF (default) → memo reset, NO sweep (06 §179)', async () => {
+      const d = {
+        origin: 'beta.example',
+        status: 'approved',
+        approvedAt: new Date(),
+        save: vi.fn(),
+      }
+      globalThis.__PEERS = { 'beta.example': d }
+      globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }))
+      revokeClientCodes.mockClear()
+      const res = mkRes()
+      await Mod.handleRevoke({ params: { origin: 'beta.example' } }, res)
+      expect(revokeClientCodes).not.toHaveBeenCalled()
+      expect(res.jsonCalls[0].revocation).toBe('peer-notified')
+    })
+
+    it('revoke: flag ON + sweep throws → best-effort, still 200 peer-notified', async () => {
+      const d = {
+        origin: 'beta.example',
+        status: 'approved',
+        approvedAt: new Date(),
+        save: vi.fn(),
+        killOutstandingCodes: true,
+      }
+      globalThis.__PEERS = { 'beta.example': d }
+      globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }))
+      _resetForTest.mockClear()
+      revokeClientCodes.mockRejectedValueOnce(new Error('redis down'))
+      const res = mkRes()
+      await Mod.handleRevoke({ params: { origin: 'beta.example' } }, res)
+      expect(_resetForTest).toHaveBeenCalled()
+      expect(res.statuses).toEqual([])
+      expect(res.jsonCalls[0].revocation).toBe('peer-notified')
     })
 
     it('revoke: outbound S2S failure → still local 200, revocation local-only', async () => {

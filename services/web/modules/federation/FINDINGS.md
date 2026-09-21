@@ -340,8 +340,9 @@ control-plane S2S vs token-plane mint. Defense in depth — a revoked
 origin fails the S2S `peer-not-approved` (pre-lookup, S2sRouter ③)
 AND the OIDC `invalid_client` (memo reset) independently.
 
-Residual (not a hole, recorded): pre-revoke **codes already minted**
-redeem until their 120 s TTL (the `killOutstandingCodes` NO-OP, 04 §5).
-That is the *only* true post-revoke residual and it is a bounded 120 s
-window (AuthorizationCode TTL, single-use per 05 §8.2), never a grant
-secret. This is what `TODO-e652c0d9`'s sweep would close.
+Residual (CLOSED by `e652c0d9`, recorded): pre-revoke **codes already
+minted** redeem until their 120 s TTL. The sweep now closes that
+window when the peer row carries `killOutstandingCodes: true` (04 §5,
+peer row in `app/models/FederationPeer.mjs`; enforced in
+`s2s/actions/revoke.mjs` + `FederationAdminController.handleRevoke`
+via `oidc/RedisOidcProviderAdapter.revokeClientCodes`, best-effort).

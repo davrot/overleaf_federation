@@ -14,13 +14,17 @@
  *     passed straight into `opaque.verify(provider, stored)` and the
  *     model is instantiated from it.
  *
- * Key layout (04 §5, 05 §8.2):
+ * Key layout (04 §5, 05 §8.2, 06 §178):
  *
  *   federation:oidc:<model>:<id>      -> JSON payload doc
  *   federation:oidc:sub:<uid>         -> Session id (the `sessionUid` sub-index)
  *   federation:oidc:usercode:<code>   -> DeviceCode id (CIBA; disabled but
  *                                        cheap to keep)
  *   federation:oidc:grant:<grantId>   -> SET of doc keys holding grantId
+ *   federation:oidc:client:<clientId> -> SET of doc keys minted for one
+ *                                        client (04 §5 `killOutstandingCodes`
+ *                                        sweep index — token docs only, see
+ *                                        `revokeClientCodes`)
  *
  * `upsert(id, payload, expiresIn)` is the ONLY persistence point
  * (base_model.js save()), per model (AuthorizationCode: 120 s, Grant:
@@ -55,9 +59,65 @@ const GRANTABLE = new Set([
 export default function createAdapter(redisClient) {
   const getClient = redisClient != null
     ? async () => redisClient
-    : () => import('../../../app/src/infrastructure/RedisWrapper.mjs')
+    : () => import('../../../../app/src/infrastructure/RedisWrapper.mjs')
       .then(({ default: RedisWrapper }) => RedisWrapper.client('federation'))
   return (modelName) => createAdapterInstance(modelName, getClient)
+}
+
+/**
+ * Kill every outstanding token doc minted for one client (04 §5
+ * `killOutstandingCodes`, 03 §4.3 "optionally invalidates outstanding
+ * codes", 06 §178/§179 the hostile residual).
+ *
+ * Index scope (verified against oidc-provider 9.12.2 source):
+ *   - `lib/models/base_token.js IN_PAYLOAD` includes `clientId`, and
+ *     `lib/models/payload.js pickPayload` persists it — EVERY
+ *     BaseToken-derived doc (AuthorizationCode, AccessToken, Grant, …)
+ *     carries the minting client id as a payload value.
+ *   - The index is gated on GRANTABLE (token models), NOT on `clientId`
+ *     presence: `Grant extends BaseToken` and has `clientId`, yet a
+ *     consent Grant must not be swept (06 §174 consent is per-origin;
+ *     revocation affects NEW grants, not the consent record).
+ *   - Session/Interaction extend BaseModel (no `clientId` payload) and
+ *     never enter the index → `destroy` leaves `federation:oidc:sub:<uid>`
+ *     alone (code payloads also carry `sessionUid`, not `uid`) → 06 §178
+ *     "not over-cross": A's admin does not log out B's users.
+ *
+ * Idempotent: an empty/absent index returns 0; a doc already expired by
+ * TTL is a no-op del. The sweep is the only writer of the index outcome
+ * (membership is also trimmed by `destroy` on every normal expiration,
+ * so the steady-state set is small).
+ *
+ * @param {string} clientId — `urn:overleaf-federation:client:<origin>`
+ *   (use `clients.mjs` `federationClientId`; this function does no
+ *   origin guessing — the caller owns the convention)
+ * @param {object} [redisClient] — optional injected ioredis client
+ *   (default: `RedisWrapper.client('federation')`, lazy)
+ * @returns {Promise<number>} number of docs destroyed
+ */
+export async function revokeClientCodes(clientId, redisClient) {
+  const getClient = redisClient != null
+    ? async () => redisClient
+    : () => import('../../../../app/src/infrastructure/RedisWrapper.mjs')
+      .then(({ default: RedisWrapper }) => RedisWrapper.client('federation'))
+  const r = await getClient()
+  const setKey = `federation:oidc:client:${clientId}`
+  const members = await r.smembers(setKey)
+  for (const memberKey of members) {
+    // Member is a doc key: federation:oidc:<Model>:<id>. Docs that
+    // expired by TTL leave stale members — `destroy` on a missing doc is
+    // a no-op del, the srem below drops the membership, and real Redis
+    // reclaims the SET on its last member anyway.
+    const m = /^federation:oidc:([^:]+):(.+)$/.exec(memberKey)
+    if (!m) {
+      await r.srem(setKey, memberKey)
+      continue
+    }
+    const [, modelName, id] = m
+    await createAdapterInstance(modelName, getClient).destroy(id)
+  }
+  await r.del(setKey)
+  return members.length
 }
 
 /**
@@ -114,6 +174,18 @@ function createAdapterInstance(modelName, getClient) {
       if (GRANTABLE.has(modelName) && payload.grantId) {
         await r.sadd(`federation:oidc:grant:${payload.grantId}`, key)
       }
+      // Client sweep index (04 §5 `killOutstandingCodes`): TOKEN docs
+      // (GRANTABLE models) persist a `clientId` payload (BaseToken
+      // IN_PAYLOAD) and are recorded under the minting client (see
+      // `revokeClientCodes`). Gated on the model list, NOT on
+      // `clientId` presence: `Grant` extends BaseToken in v9 and carries
+      // `clientId` too, but a consent Grant is NOT swept (06 §174).
+      // No EX on the SET: real Redis reclaims a SET on its last member,
+      // and stale members are harmless (the sweep no-ops on expired
+      // docs).
+      if (GRANTABLE.has(modelName) && typeof payload.clientId === 'string') {
+        await r.sadd(`federation:oidc:client:${payload.clientId}`, key)
+      }
       return id
     },
 
@@ -133,6 +205,17 @@ function createAdapterInstance(modelName, getClient) {
         const payload = JSON.parse(raw)
         if (payload.uid != null) await r.del(`federation:oidc:sub:${payload.uid}`)
         if (payload.userCode != null) await r.del(`federation:oidc:usercode:${payload.userCode}`)
+        // Client sweep index: `revokeByGrantId` bypasses `destroy`, so
+        // drop the doc from the minting client's set here (and del the
+        // set when empty, mirroring the fake-Redis behavior in `destroy`).
+        if (GRANTABLE.has(modelName) && typeof payload.clientId === 'string') {
+          const clientSet = `federation:oidc:client:${payload.clientId}`
+          await r.srem(clientSet, memberKey)
+          const remainingClients = await r.scard(clientSet)
+          if (remainingClients === 0) {
+            await r.del(clientSet)
+          }
+        }
         await r.del(memberKey)
       }
       await r.del(setKey)
@@ -152,6 +235,21 @@ function createAdapterInstance(modelName, getClient) {
           const remaining = await r.scard(`federation:oidc:grant:${payload.grantId}`)
           if (remaining === 0) {
             await r.del(`federation:oidc:grant:${payload.grantId}`)
+          }
+        }
+        // Client sweep index: drop this doc from the minting client's
+        // set. GRANTABLE gate (a Grant still holds `clientId` in its
+        // payload and must never be touched here — it was never in the
+        // index), mirroring `revokeByGrantId` above.
+        if (GRANTABLE.has(modelName) && typeof payload.clientId === 'string') {
+          const clientSet = `federation:oidc:client:${payload.clientId}`
+          await r.srem(clientSet, key)
+          const remaining = await r.scard(clientSet)
+          if (remaining === 0) {
+            // Real Redis deletes a SET that becomes empty via SREM; the
+            // fake test clients do not — mirror the grant-SET cleanup
+            // above.
+            await r.del(clientSet)
           }
         }
       }

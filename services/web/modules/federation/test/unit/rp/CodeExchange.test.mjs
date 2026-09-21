@@ -100,14 +100,18 @@ function setupFetch(jwksResponses, {
     const path = String(url)
     if (path.endsWith('/federation/oidc/jwks')) {
       const idx = jwksCalls++
+      const body = jwksResponses[Math.min(idx, jwksResponses.length - 1)]
       return {
         ok: true,
-        json: async () => jwksResponses[Math.min(idx, jwksResponses.length - 1)],
+        status: 200,
+        text: async () => JSON.stringify(body),
+        json: async () => body,
       }
     }
     return {
       ok: tokenOk,
       status: tokenStatus,
+      text: async () => JSON.stringify(tokenOk ? tokenBody : { error: 'invalid_grant' }),
       json: async () => (tokenOk ? tokenBody : { error: 'invalid_grant' }),
     }
   })

@@ -1232,6 +1232,11 @@ module.exports = {
     keyRotationGraceDays: 14, // federation key retire window (02 §5)
     institutionId: null, // e.g. 'dfn-de'; when set (P3), leaf adds authority_hints + institution
     institutionAuthorityHints: [], // OIDF intermediate authority chain to publish on the leaf (P3, 07 §P3)
+    // Outbound fetch timeouts (06 §7) — knobs so a degraded peer doesn't
+    // hang a visitor's login flow for more than a bounded window.
+    s2sFetchTimeoutMs: 10000, // S2S outbound (invite + admin revoke)
+    tokenFetchTimeoutMs: 30000, // code-exchange token POST covers B's full OIDC dance
+    jwksFetchTimeoutMs: 5000, // JWKS blob (small JSON) is fetched before id_token verify
   },
 
   csp: {

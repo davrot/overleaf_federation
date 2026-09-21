@@ -15,19 +15,28 @@
 //     (clients.mjs), so a revoked peer stops minting grants on the next
 //     provider rebuild
 //   - does NOT delete mirror rows
-//   - does NOT kill existing receiver sessions (04 §5 v1)
-//   - `killOutstandingCodes` admin toggle: NO-OP in v1 (04 §5) — the
-//     field exists for the admin UI (P2); no Redis grant sweep here.
+//   - does NOT kill existing receiver sessions (04 §5 v1 — 06 §178
+//     "not over-cross": A's admin does not log out B's users on A;
+//     the sweep only touches token docs minted for the revoked
+//     client, never Session/Grant docs)
+//   - `killOutstandingCodes` (peer toggle, default off — 04 §5, 06
+//     §179 "optional, default off"): when true, a revoked transition
+//     sweeps the peer's outstanding codes (adapter
+//     `revokeClientCodes`, 04 §5 client index) — best-effort (a
+//     Redis failure warns, the revocation itself is already local).
 //
 // Idempotent: a second `revoke` receipt (already-`revoked` row) still
 // returns ok with no double side-effect (the updateOne match filters
 // `status != 'revoked'`).
 import { FederationPeer } from '../../app/models/FederationPeer.mjs'
 import { _resetProviderMemo } from '../../oidc/createProvider.mjs'
+import { federationClientId } from '../../oidc/clients.mjs'
+import { revokeClientCodes } from '../../oidc/RedisOidcProviderAdapter.mjs'
+import logger from '@overleaf/logger'
 
 import { S2S_ERRORS } from '../../oidf/verify.mjs'
 
-export default async function revoke({ body, callerOrigin }) {
+export default async function revoke({ body, callerOrigin, peer }) {
   const origin = body?.payload?.origin ?? 'this-connection'
 
   // The revocation target is always the sender row; an explicit
@@ -54,6 +63,18 @@ export default async function revoke({ body, callerOrigin }) {
   // Count) only, NOT on the idempotent double-receipt no-op path.
   if (res.modifiedCount) {
     _resetProviderMemo()
+    // 06 §178/§179: the optional hostile-residual sweep, keyed on the
+    // peer's own `killOutstandingCodes` toggle (default off). Best-effort
+    // (never fails/rolls back the revocation — 03 §4.3 "optional";
+    // the memo reset above already stops NEW minting, and single-use
+    // 120 s codes are the bounded residual otherwise).
+    if (peer && peer.killOutstandingCodes === true) {
+      try {
+        await revokeClientCodes(federationClientId(callerOrigin))
+      } catch (error) {
+        logger.warn({ error, origin: callerOrigin }, 'federation: code sweep after revoke failed')
+      }
+    }
   }
 
   return { ok: true, payload: {} }

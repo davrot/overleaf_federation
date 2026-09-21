@@ -23,10 +23,15 @@ const JWKS_CACHE_TTL_SECONDS = 3600
 const JWKS_CACHE_PREFIX = 'federation:jwks:'
 
 // Outbound hardening (06 §7): no fetch may hang a visitor's login flow.
-// JWKS is a small JSON blob — 5 s. The token exchange covers the whole
-// B-side OIDC dance — 30 s.
-const JWKS_FETCH_TIMEOUT_MS = 5000
-const TOKEN_FETCH_TIMEOUT_MS = 30000
+// Knobs in Settings (federation.jwksFetchTimeoutMs / tokenFetchTimeoutMs,
+// 04 §7), with these as the shipped defaults.
+const JWKS_FETCH_TIMEOUT_MS = Settings.federation?.jwksFetchTimeoutMs ?? 5000
+const TOKEN_FETCH_TIMEOUT_MS = Settings.federation?.tokenFetchTimeoutMs ?? 30000
+
+// 06 §8 trust posture: never follow a redirect off the peer host we are
+// talking to. B's provider mount must serve JWKS/token at exactly the
+// URLs in 01 §6 — a 3xx to elsewhere is a mis-anchored trust target
+// (or a MITM hop), not a redirect to chase.
 
 function getRedis(redis) {
   return redis ?? RedisWrapper.client('federation')
@@ -35,11 +40,27 @@ function getRedis(redis) {
 async function fetchAndCacheJwks(redis, origin) {
   const resp = await fetch(`https://${origin}/federation/oidc/jwks`, {
     signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT_MS),
+    redirect: 'manual',
   })
+  if (resp.status >= 300 && resp.status < 400) {
+    throw new Error(`jwks-fetch-redirect-refused: ${resp.status}`)
+  }
   if (!resp.ok) {
     throw new Error(`jwks-fetch-failed: ${resp.status}`)
   }
-  const jwks = await resp.json()
+  const text = await resp.text()
+  // Guard against a non-JSON body (e.g. a served error page): without
+  // this `jwks` would be garbage and `resolveJwk` would throw an
+  // uncaught TypeError instead of a clean machine error.
+  let jwks
+  try {
+    jwks = JSON.parse(text)
+  } catch {
+    throw new Error('jwks-fetch-invalid-json')
+  }
+  if (!jwks?.keys?.length) {
+    throw new Error('jwks-fetch-empty')
+  }
   try {
     await redis.set(`${JWKS_CACHE_PREFIX}${origin}`, JSON.stringify(jwks), 'EX', JWKS_CACHE_TTL_SECONDS)
   } catch (err) {
@@ -68,6 +89,10 @@ async function fetchCachedJwks(redis, origin) {
  * the header has to be read manually from the first segment.
  */
 function resolveJwk(jwks, token) {
+  // Null-guard (FINDINGS bug-hunt LOW): if the initial JWKS fetch failed,
+  // `jwks` can be `null` and `jwks.keys?.find` would throw an uncaught
+  // TypeError instead of a clean `exchange-failed`.
+  if (!jwks || !Array.isArray(jwks.keys)) return null
   const { kid } = decodeProtectedHeader(token)
   if (!kid) return null
   const key = jwks.keys?.find(k => k.kid === kid)
@@ -118,6 +143,7 @@ export async function exchange(peerOrigin, opts, redis) {
       code_verifier: opts.codeVerifier,
     }),
     signal: AbortSignal.timeout(TOKEN_FETCH_TIMEOUT_MS),
+    redirect: 'manual',
   }).then(async r => {
     const body = await r.json().catch(() => ({}))
     if (!r.ok || !body.id_token) {

@@ -26,6 +26,7 @@
 // OIDC auth URL").
 
 import logger from '@overleaf/logger'
+import Settings from '@overleaf/settings'
 
 import { expressify } from '@overleaf/promise-utils'
 import PrivilegeLevels from '../../../app/src/Features/Authorization/PrivilegeLevels.mjs'
@@ -51,8 +52,9 @@ export const FEDERATED_PRIVILEGES = [
 ]
 
 // S2S budget: assert-level 401 / rate-limit 429 / business 200. An
-// outbound S2S call must never hang the invite form — 10 s cap (06 §7).
-const S2S_FETCH_TIMEOUT_MS = 10000
+// outbound S2S call must never hang the invite form — knob in Settings
+// (federation.s2sFetchTimeoutMs, shipped 10 s, 06 §7).
+const S2S_FETCH_TIMEOUT_MS = Settings.federation?.s2sFetchTimeoutMs ?? 10000
 
 class PeerRefusal extends Error {
   constructor(code, detail) {
@@ -76,7 +78,14 @@ export async function callPeer(peerOrigin, action, payload) {
     headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(S2S_FETCH_TIMEOUT_MS),
+    redirect: 'manual',
   })
+  // 06 §8: a 3xx means the peer redirected the S2S wire elsewhere —
+  // the wire's trust anchor (01 §6) is the peer origin itself, so a hop
+  // is refused, not chased.
+  if (resp.status >= 300 && resp.status < 400) {
+    throw new PeerRefusal('redirect-refused', `peer S2S returned ${resp.status} redirect`)
+  }
   if (resp.status === 429) {
     throw new PeerRefusal('rate-limited', 'peer rate limit exceeded')
   }

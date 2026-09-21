@@ -28,6 +28,20 @@
 import { FederationPeer } from '../app/models/FederationPeer.mjs'
 
 /**
+ * The provider client_id minted for a peer origin (03 §2 convention).
+ * Single source of truth shared by `clients[]` (below) and the code-sweep
+ * index (04 §5 `killOutstandingCodes`, `oidc/RedisOidcProviderAdapter.mjs`) —
+ * a sweep keyed on anything else would miss the docs oidc-provider
+ * actually persists.
+ *
+ * @param {string} origin — bare FQDN (FederationPeer.origin convention)
+ * @returns {string} urn:overleaf-federation:client:<origin>
+ */
+export function federationClientId(origin) {
+  return `urn:overleaf-federation:client:${origin}`
+}
+
+/**
  * Rebuild the OIDC provider clients[] snapshot from approved peers.
  *
  * @returns {Promise<Array<object>>}
@@ -35,7 +49,7 @@ import { FederationPeer } from '../app/models/FederationPeer.mjs'
 export async function buildOidcProviderClients() {
   const peers = await FederationPeer.find({ status: 'approved' })
   return peers.map((peer) => ({
-    client_id: `urn:overleaf-federation:client:${peer.origin}`,
+    client_id: federationClientId(peer.origin),
     redirect_uris: [`https://${peer.origin}/federation/oidc/rp/callback`],
     application_type: 'web',
     token_endpoint_auth_method: 'none',

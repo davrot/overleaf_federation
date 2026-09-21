@@ -36,6 +36,7 @@
 // reason for the admin UI (mirrors S2S_ERRORS vocabulary where sensible).
 
 import logger from '@overleaf/logger'
+import Settings from '@overleaf/settings'
 
 import {
   decodeEntityConfiguration,
@@ -50,6 +51,8 @@ import { FederationKey } from '../app/models/FederationKey.mjs'
 import { FederationPeer } from '../app/models/FederationPeer.mjs'
 import { FederationTrustAnchor } from '../app/models/FederationTrustAnchor.mjs'
 import { _resetProviderMemo } from '../oidc/createProvider.mjs'
+import { federationClientId } from '../oidc/clients.mjs'
+import { revokeClientCodes } from '../oidc/RedisOidcProviderAdapter.mjs'
 import { buildS2sRequest } from '../oidf/ClientAssertionClient.mjs'
 import { createKeyProvider } from '../oidf/keystore.mjs'
 import { audit, AUDIT_TYPES } from '../util/Audit.mjs'
@@ -58,8 +61,10 @@ import { ProjectAuditLogEntry } from '../../../app/src/models/ProjectAuditLogEnt
 export const DIRECTIONS = ['outbound', 'inbound', 'both']
 
 // Outbound hardening (06 §7): pin-time leaf fetch + revoke S2S cap at
-// 10 s; admin UIs never block longer than that.
-const ADMIN_OUTBOUND_FETCH_TIMEOUT_MS = 10000
+// one knob (federation.s2sFetchTimeoutMs, shipped 10 s); admin UIs
+// never block longer than that.
+const ADMIN_OUTBOUND_FETCH_TIMEOUT_MS =
+  Settings.federation?.s2sFetchTimeoutMs ?? 10000
 
 // Bare FQDN (the FederationPeer.origin + S2S wire `from` convention,
 // 03 §2). Ports/schemes rejected at the source: the entity id is always
@@ -132,17 +137,29 @@ async function handlePin(req, res) {
   }
 
   // TOFU fetch (02 §3): HTTPS, constructed from the validated FQDN
-  // (no user-controlled URL, 06 §2). No cookies/credentials follow
-  // (undici defaults: redirect 'follow' — acceptable, we only read the
-  // leaf at the host we just fetched; peers are expected to serve it
-  // without redirect).
+  // (no user-controlled URL, 06 §2). `redirect: 'manual'` (FINDINGS
+  // bug-hunt LOW): a 3xx hop means the returned EC is NOT anchored to
+  // this host, so the pin would be to a different EC than the origin
+  // names. We refuse rather than follow; peers are expected to serve
+  // the leaf at the canonical origin (02 §5).
   const leafUrl = `https://${origin}/.well-known/openid-federation`
   let ec
   try {
     const resp = await fetch(leafUrl, {
       headers: { Accept: 'application/entity-statement+jwt' },
       signal: AbortSignal.timeout(ADMIN_OUTBOUND_FETCH_TIMEOUT_MS),
+      redirect: 'manual',
     })
+    const status = resp.status
+    if (status >= 300 && status < 400) {
+      logger.warn({ leafUrl, status }, 'federation: pin leaf fetch returned a redirect (refused)')
+      return res
+        .status(502)
+        .json({
+          message: `peer leaf returned an HTTP ${status} redirect; expected the entity configuration at the canonical origin`,
+          code: 'peer-unreachable',
+        })
+    }
     if (!resp.ok) {
       logger.warn({ leafUrl, status: resp.status }, 'federation: pin leaf fetch not ok')
       return res
@@ -409,7 +426,9 @@ async function handleRevoke(req, res) {
         headers,
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(ADMIN_OUTBOUND_FETCH_TIMEOUT_MS),
+        redirect: 'manual',
       })
+      // 06 §8: a redirect response is not a successful notification.
       peerNotified = resp.ok
     } catch (error) {
       logger.warn({ error, origin: peer.origin }, 'federation: outbound revoke failed')
@@ -422,6 +441,19 @@ async function handleRevoke(req, res) {
       _resetProviderMemo()
     } catch (error) {
       logger.warn({ error, origin }, 'federation: provider memo reset failed after revoke')
+    }
+
+    // 04 §5 / 06 §179: `killOutstandingCodes` (peer toggle, default off)
+    // — sweep this peer's outstanding auth/token docs. Best-effort (a
+    // failure never blocks the local revocation; the memo reset above
+    // already stops NEW minting, and single-use 120 s codes bound the
+    // residual otherwise).
+    if (peer.killOutstandingCodes === true) {
+      try {
+        await revokeClientCodes(federationClientId(peer.origin))
+      } catch (error) {
+        logger.warn({ error, origin: peer.origin }, 'federation: code sweep after revoke failed')
+      }
     }
 
     await audit({
