@@ -19,7 +19,8 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 |-------|-------|--------|
 | P0 | leaf mount + keystore bootstrap + OIDC OP stack + adapter + bridge + clients | **DONE** (index.mjs mounted; 2026-09-18b batch) |
 | P1 | S2S (pairwise depth-1 verify) + invite + A-side grant round-trip (RP) + admin pin stub | **DONE** (s2s/ + rp/ + admin/ committed 2026-09-18b) |
-| P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit | rate-limit + audit + admin **DONE**; claim allow-list + live Settings integration open |
+| P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit + institutional TA (P3 pin-time) | **DONE** (rate-limit, audit, admin, claim allow-list via `Redact.CLAIM_LOG_ALLOWLIST`, institutional TA pin-time all shipped + committed) |
+| P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -326,19 +327,27 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 7. Tests: S2S round-trip (two in-proc apps + fake redis), replay dedup, 429 path, rate-limit store unit
 8. Run: `cd services/web && yarn run vitest run modules/federation/test/unit/oidf/keystore.test.mjs` (12 pass regression) + LSP diagnostics on all new files
 
-### TODO ID mapping (for session handoff via .pi/todos)
-| TODO | Item | Phase | Status (2026-09-18) |
-|------|------|-------|------|
-| TODO-1f4e6ae5 | util layer (Anchor, Redact, Audit + RateLimitStore) | P0 | **util trio DONE**; RateLimitStore pending (in ec1f0879) |
-| TODO-c7238651 | User.federation + ProjectInvite.federated schema | P0 | **DONE** (incl. migration) |
-| TODO-bc8ad398 | leaf.mjs serve + mount helper | P0 | leaf committed; mount wiring = index.mjs (1fed7e98) |
-| TODO-ec1f0879 | S2S router + 3 actions + rate limit | P1 | **DONE** (committed 2026-09-18b) |
-| TODO-7e3fc1d8 | A-side RPC CodeExchange + CallbackRouter | P1 | **DONE** (committed 2026-09-18b) |
-| TODO-c6bbd319 | invite controller/router | P1 | **DONE** (committed 2026-09-18b) |
-| TODO-5d6003df | admin router/controller + consent view | P2 | **DONE** (committed 2026-09-18b) |
-| TODO-1fed7e98 | index.mjs mount wiring + start | P0 | **DONE** (committed 2026-09-18b) |
-| TODO-4c7da2af | Settings + app-level auth guards | integration | open |
-| TODO-fd9f09c0 | unit tests + validation gate | testing | **DONE** (60/60 green, ESLint clean) committed 2026-09-18b |
+### TODO ID mapping (current `.pi/todos` state — verified 2026-09-20)
+| TODO | Item | Status |
+|------|------|--------|
+| TODO-1fed7e98 | index.mjs mount wiring + start | **CLOSED** (verified: `index.mjs` `start()` runs `ensureBootstrapped` + `retireExpiredKeys`) |
+| TODO-bc8ad398 | leaf.mjs serve + mount helper | **CLOSED** (leaf mounted via `appMiddleware`) |
+| TODO-ec1f0879 | S2S router + 3 actions + rate limit | **CLOSED** (14 S2S tests green) |
+| TODO-7e3fc1d8 | A-side RPC CodeExchange + CallbackRouter | **CLOSED** (open-redirect guard live, 7+7 tests) |
+| TODO-c6bbd319 | invite controller/router | **CLOSED** (12 invite tests) |
+| TODO-5d6003df | admin router/controller + consent view | **CLOSED** (11 admin routes + `consent.pug`) |
+| TODO-4c7da2af | Settings + app-level auth guards + admin route | **CLOSED** (Settings block at L1228; admin guarded by `ensureUserIsSiteAdmin`) |
+| TODO-fd9f09c0 | unit tests + validation gate | **CLOSED** (76/76 green, ESLint clean) |
+| TODO-c61e585d | hardening batch: fetch timeouts + redirect guard + institution-claim fix + institutional TA | **CLOSED** (see SESSION 5) |
+| TODO-a9c6dd79 | two-instance integration test (OIDC code dance + S2S round-trip) | **CLOSED** (12/12 green; SESSION 8) |
+| TODO-840029f1 | delete probe files; reconcile `requireAdminApproval` default | open (probe cleanup = `probe*.mjs` + `oidc_v9probe*.mjs` untracked in `services/web/`; `requireAdminApproval` default stays `true` per plan 04 §3 — see SESSION 6) |
+| TODO-eef3de7d | run migrations against real Mongo (docker) | open |
+| TODO-1ec14289 | two-instance live smoke (docker / smoke script) | open |
+| TODO-e652c0d9 | settings knobs for timeouts + `killOutstandingCodes` sweep | open |
+| TODO-45cb2ea7 | frontend: invite preview hook + admin UI | open |
+| TODO-47f7a583 | `allowFederatedProjectCreate` (04 §3) | open |
+| TODO-1cd853cb | `requireAdminApproval`: approval queue for federated grants | open |
+| TODO-0fa0f9f3 | federation admin pages + configuration wizards | open | |
 
 ---
 
@@ -448,3 +457,387 @@ endpoints + S2S router unit tests + 10 READMEs + `ADMIN-GUIDE.md` +
 20260721130000 + HANDOFF update. Explicit `git add` paths only (NEVER
 `git add -A`; `.gitignore` is 4 lines and does not cover `node_modules`
 globally, so `-A` stages every `node_modules/` in the monorepo).
+
+---
+
+# SESSION 6 (this session — 2026-09-20): tracker reconciliation + two-instance integration test IN PROGRESS
+
+## DONE this session
+1. **Tracker reconciliation** (9 stale entries CLOSED after empirical verification):
+   `1fed7e98`, `bc8ad398`, `ec1f0879`, `7e3fc1d8`, `c6bbd319`, `5d6003df`,
+   `4c7da2af`, `fd9f09c0`, `c61e585d`. Evidence per item: files on disk + the hardening
+   grep set (`AbortSignal.timeout` at all 5 outbound sites; open-redirect guard at
+   `CallbackRouter.mjs` L171-184; `institution: user.institution || null` in
+   `createProvider` L61; institutional-TA trio present; admin trust-anchor routes
+   GET/POST/DELETE `/admin/federation/trust-anchors`) + re-ran the gate:
+   **76/76 green** (`npx vitest run federation`), ESLint exit 0.
+   Naming note: committed model is `modules/federation/app/models/FederationTrustAnchor.mjs`
+   (the in-task draft said `FederationInstitutionalAnchor` — renamed during build;
+   READMEs + HANDOFF all use the final name). Migration is
+   `tools/migrations/20260721130000_add_federation_trust_anchor_index.mjs`.
+
+2. **oidc-provider v9 OIDC dance EMPIRICALLY PROVEN** via probe runs against a real
+   express app with the real `oidc-provider` v9.12.2. This is the hard part of the
+   integration test — the dance is NOT "auth → bridge → resume → code"; v9 inserts a
+   SECOND interaction: **login → consent**. Full shape (probe evidence: `probe9_dance.mjs`,
+   scratch, do not commit):
+   |
+   | Step | Request | Response | Note |
+   |---|---|---|---|
+   | 0 | `GET /federation/oidc/auth?client_id=...&scope=openid&response_type=code&redirect_uri=...&code_challenge=<S256>&code_challenge_method=S256&state=...&nonce=...` | 303 → `/federation/oidc/interact/<uidA>` | sets cookies `_interaction`, `_interaction_resume` |
+   | 1 | `GET /interact/<uidA>` | bridge sees `prompt.name==='login'` → `interactionFinished({login:{accountId,ts}})` | 303 → `/federation/oidc/auth/<uidA>` (RESUME path, singular `auth`) |
+   | 2 | `GET /federation/oidc/auth/<uidA>` | 303 → `/federation/oidc/interact/<uidB>` | NEW interaction (uidB) for consent |
+   | 3 | `GET /interact/<uidB>` | bridge sees `prompt.name==='consent'` → 200 HTML consent form | `uidB` appears in the bridge route param only; provider resolves the interaction from the `_interaction` cookie — the `:uid` param is decorative |
+   | 4 | `POST /interact/<uidB>/consent` (bridge auto-grant path in this test) | bridge creates `provider.Grant` + `interactionFinished({consent:{grantId}})` | 303 → `/federation/oidc/auth/<uidB>` |
+   | 5 | `GET /federation/oidc/auth/<uidB>` | 302 → `redirect_uri?code=...&state=...` | code issued |
+   | 6 | `POST /federation/oidc/token` form `grant_type=authorization_code&client_id&code&code_verifier&redirect_uri` | 200 `{ access_token?, id_token, ... }` | NO cookie needed for token — code + code_verifier + client_id + redirect_uri suffice |
+   |\n\n### LOCKED probe facts for v9.12.2 (verify against code before trusting; these are what the tests exercise)
+   - **PKCE is MANDATORY for `token_endpoint_auth_method:'none'` clients.** Auth endpoint returns
+     400 `invalid_request` ("Authorization Server policy requires PKCE to be used for this
+     request") without `code_challenge` + `code_challenge_method=S256`. The A-side
+     `FederatedInviteController._handleAuthorize` MUST include both in the redirect URL that
+     the user's browser hits — check the implementation matches the probe's auth URL shape.
+     (If the implementation doesn't already, the integration test will catch it in step 0.)
+   - **v9 cookie names: `_interaction` + `_interaction_resume`** (NOT `op_interaction` /
+     `op_session`). Set on the initial auth 303. Must be carried through every hop.
+   - **Bridge resolves the interaction from the COOKIE, not the path param.**
+     `provider.interactionDetails(req,res)` internally reads `ctx.cookies.get('_interaction')`.
+     Test just needs to follow Location and carry the cookie jar.
+   - `interactions: { url: (_ctx, i) => ...interact/${i.uid} }` override is REQUIRED in
+     `createProvider` (v9 default is `/interaction/<uid>` plural); bridge routes mount at the
+     overridden path.
+   - The RESUME path (auth step, NOT the interaction) is `/federation/oidc/auth/<uid>` (singular
+     `auth`, same as the initial auth endpoint but with uid param). v9's `interactionFinished`
+     303s there always.
+   - `oidc-provider` v9 has ZERO `req.session` references — its state is cookie-driven via
+     `createContext`. The bridge is the ONLY consumer of `req.session.user._id` (B-side login).
+     This is why the test can pre-seed `req.session.user` without needing passport.
+   - Token endpoint (`token.js`) has ZERO cookie references. code + code_verifier + client_id +
+     redirect_uri is the entire input surface.
+   - `MemoryAdapter` (oidc-provider built-in) works in a probe with no Redis; the module uses
+     `RedisOidcProviderAdapter` and the test supplies a fake via the adapter's redis-client
+     injection hook — shape compatibility is confirmed by the v9 adapter contract (7 methods,
+     modelName arg, see §4.8).
+
+3. **Two-instance integration test — DESIGN LOCKED** (file not yet written):
+   - Location: `modules/federation/test/unit/integration/two-instance.sequential.test.mjs`
+     (matches the existing `Sequential` vitest project glob — no config change).
+   - **Single-origin design** (NOT two app instances): `Settings` is a module-level singleton so
+     A and B cannot have different origins in one process. A and B share
+     `Settings.siteUrl: 'https://beta.example'`. "Two instances" = two ROLES mounted on ONE
+     express app: S2S (always), OIDC bridge, CallbackRouter, provider catch-all. A-role ops are
+     in-process (call `buildS2sRequest` from `ClientAssertionClient.mjs`;
+     `exchange`/`handleCallback` from `CodeExchange.mjs`/`CallbackRouter.mjs` directly, with the
+     `globalThis.fetch` wrapper intercepting `https://beta.example/...` and rewriting to
+     `http://127.0.0.1:<port>/...`).
+   - One express app mount order (LOCKED, mirrors `index.mjs`):
+     ① `express.json()` (S2S body) ② fake session middleware (`req.session={user:{_id: ALICE_B}}`,
+     pre-seeded to avoid passport) ③ S2sRouter POST `/federation/s2s` ④ `mountBridge(webRouter)`
+     (GET `/federation/oidc/interact/:uid`, POST `.../consent`, POST `.../deny`) ⑤ CallbackRouter
+     GET `/federation/oidc/rp/callback` ⑥ provider catch-all
+     `webRouter.use('/federation/oidc', provider.callback())` LAST.
+     NO `express.urlencoded` — v9's `selective_body.js` reads the raw stream itself for the token
+     endpoint.
+   - Pug engine registered via `app.engine('.pug', ...)` (or rely on Express 4 auto-require;
+     `node_modules/pug` at repo root resolves fine).
+   - Fake redis: full Map surface (get/set/del/pttl/incr/expire/ttl/sadd/smembers/srem/scard)
+     injected via `RateLimitStore._setRateLimitRedisClientForTest`
+     + `verify.mjs._setReplayRedisClientForTest` + adapter redis-client hook +
+     `CodeExchange`/state redis via `globalThis.fetch`-independent direct redis injection where
+     the module exposes a test hook (see S2sRouter.test.mjs pattern).
+   - Mock stores on `globalThis` (survive `vi.resetAllMocks()` + `vi.resetModules()` per test file —
+     see S2sRouter.test.mjs):
+     `__users` (User rows), `__peers` (FederationPeer rows), `__auditRows`
+     (`ProjectAuditLogEntry.create` calls), `__redis` (fake redis Map), `__FK` (FederationKey doc
+     rows: `{_id, purpose, kid, publicKey, privateKey, state, expiresAt, publishedAt}`),
+     `__grants` (CollaboratorsHandler.promises.addUserIdToProject args), `__sessions`.
+   - Mock list (vi.mock factories, target `@overleaf/settings` as default export object with
+     `siteUrl: 'https://beta.example'` + `security.sessionSecret` + `federation:{enabled:true,
+     keyRotationGraceDays:14, institutionAuthorityHints:[]}`, all module-local model files, RedisWrapper
+     (must resolve to the fake redis), CollaboratorsHandler (default export mock — heavy chain),
+     UserSessionsManager (default export mock — redis dependency), AuthenticationController
+     (default export mock — passport chain; test pre-seeds session so the dynamic import path is
+     NOT taken), AuthorizationMiddleware (heavy). User/FederationPeer/FederationKey/
+     FederationTrustAnchor/ProjectAuditLogEntry module files vi.mocked per S2sRouter.test.mjs
+     pattern (thenables with `.sort().lean()` chainable).
+   - Seed: one `FederationKey` doc per purpose ('federation' + 'oidc') generated with
+     `@oidfed/core`'s `generateSigningKey('ES256')` (the module's keystore expects
+     `{_id, purpose, kid, publicKey, privateKey, state:'active', ...}` shape). `keystore._clearKeySetCache()`
+     after reseeding (module-level cache Map survives across tests).
+     Peer row: `{origin:'beta.example', status:'approved', kid, anchorJwks}` (single-origin — the
+     peer's origin IS this origin; `from` field in S2S bodies will be the same string). One User
+     row for ALICE_B: `{_id: <24hex>, email:'alice@beta.example', first_name:'Alice',
+     last_name:'Beta', institution:'Beta Institut', suspended:false}`.
+   - 3-state S2S scenarios (all in-process, each a fetch to the app URL with the client_assertion
+     header built by `buildS2sRequest(...)`):
+     a. `invited` (preview) — expect 200 `{ ok:true, payload:{ approved:true, displayName } }`,
+        audit row NOT created (read-only preview per LOCKED decision §8).
+     b. `authorize-invite` (approve) — expect 200 `{ ok:true, payload:{ approved:true,
+        displayName, institution } }` + audit `federated_invite_approved` (projectId null, meta
+        `{origin, localName, displayName, assertion}`).
+     c. `authorize-invite` (deny) — expect 200 `{ ok:true, payload:{ approved:false } }` +
+        audit `federated_invite_denied`.
+     d. Replay — same `jti` twice → second call 401 `replay-jti` (Redis SETNX key
+        `federation:replay:<jti>`; fake redis provides `set` with `nx` + `px`).
+     e. Bad signature — sign with ROULE key (separate `generateSigningKey`) whose kid is NOT
+        pinned on the peer row → 401 `unknown-kid` (verify.mjs does kid-pinned check, NO refetch
+        in v1 — see `verify.mjs`'s `S2S_ERRORS`). Or: known kid but re-signed body →
+        `bad-signature`.
+     f. Peer revoked — flip `__peers` row status, re-send a valid `authorize-invite` → 401
+        `peer-not-approved` (peer pre-lookup in S2sRouter ordering, no crypto run).
+     g. Rate limit — send 31 rapid `authorize-invite` invocations → 31st returns 429 with
+        `Allow-Retry-After`. (Or: fake redis seeded past the 30 budget for a deterministic 1-shot
+        trip.)
+     h. Federation off — clear `Settings.federation.enabled` via the mock factory's live getter
+        (see S2sRouter.test.mjs pattern) → 200 `{ ok:true, enabled:false }` envelope (router is
+        ALWAYS mounted).
+     i. Revoke — valid `revoke` action → peer row marked revoked, audit
+        `federation_peer_trust_revoked`, idempotent second call still 200 ok.
+        FOLLOW-UP after revoke: a subsequent `authorize-invite` → 401 `peer-not-approved` (the
+        revoke marks the SENDER's row — in single-origin mode that's beta.example, so post-revoke
+        S2S from beta.example is refused. That's the expected outcome and the test asserts it.)
+   - OIDC integration scenarios (driven against the mounted app via fetch + cookie jar + the
+     probe-locked 6-step dance above):
+     1. **HAPPY PATH**: seed ProjectInvite.federated row via `__invites` + mirror user via
+        `__users` (or rely on CallbackRouter to create it — see below for which assertion set
+        covers which). Call `FederatedInviteController`'s authorize path IN-PROCESS to obtain
+        `{ authUrl, state }` (that's the real entry: the test then drives the 6-step dance from
+        `authUrl`, with the fetch wrapper rewriting `https://beta.example/...` → local). On
+        completion, GET the callback URL (which the dance's final 302 points at) and assert:
+        - `__users` gained the mirror row (`{ email: '', federation: { origin: 'beta.example',
+          localName: 'alice@beta.example' } }`) — OR already seeded and the test asserts
+          session-only.
+        - `__grants` captured `CollaboratorsHandler.promises.addUserIdToProject(projectId,
+          addingUserId, userId=mirror._id, privilegeLevel=READ_AND_WRITE)` call.
+        - Session got `req.session.user = <sessionId>` (track via the fake
+          UserSessionsManager.promises.trackSession args).
+        - Audit `federated_invite_approved` row present.
+        - The final 302 Location is `intent.url` (project URL) per `CallbackRouter`'s
+          open-redirect guard (must start `/`; `/projects/<id>` is a valid project URL path —
+          seed the intent accordingly).
+     2. **PKCE state one-shot**: second callback with the SAME `state` (and `code`) → 4xx or error
+        envelope. `consumePkceState` is Redis-primary (`federation:rp-state:<state>` key + session
+        slot cleared) — after first successful call the redis key is gone; second call must
+        refuse. Assert `state-invalid` or equivalent error code (check `CallbackRouter.mjs`'s
+        error path for the exact status + body shape — the unit test State.test.mjs covers the
+        primitives; the integration asserts the wired-up behavior).
+     3. **Federation off** (via the live mock factory) → CallbackRouter or upstream 4xx (the
+        provider catch-all won't even mount in a full-app test but this scenario is about the
+        S2S router which IS always mounted with a machine-readable refusal — that's covered by
+        the S2S scenario h above; for the OIDC side a federation-off state should result in a
+        provider 404 or an explicit refusal — assert whatever the implementation does and
+        document it).
+     4. **Wrong redirect_uri** → 302 back to... (the A-side project URL; CallbackRouter doesn't
+        control redirect_uri validation — that's oidc-provider's job at the token endpoint. This
+        scenario may collapse with the token-exchange step and can be dropped if the token
+        endpoint rejects before the callback is reached; document the outcome).
+     - `CallbackRouter.mjs` `handleCallback` is a NAMED export (not just `apply`) — the test can
+       call it directly with a mock req/res when the dance's last leg is more than what the app
+       mount requires. BUT the point of the integration test is the FULL path — drive it via
+       fetch to `GET /federation/oidc/rp/callback?...?state=...` on the app, which is what a
+       real browser would do after B's dance.
+   - `vi.resetModules()` in `bootstrap.mjs` afterEach + `vi.resetAllMocks()` → module-level state
+     (keystore cache Map, provider singleton) is reset only via the module's own `_resetForTest`
+     / `_clearKeySetCache` hooks. `getOidcProvider()` is a lazy singleton with a
+     `_resetForTest` export (check `createProvider.mjs`'s exports list) — call it in afterAll
+     so the provider's internal cookie/JWKS state doesn't leak across tests in other files
+     (sequential project runs this file LAST per groupOrder:1, fileParallelism:false — safe).
+
+4. **Remaining 7 ToDos (priority order)** — see the TODO ID mapping table above (rewritten
+   this session). The order: a9c6dd79 (this file, IN PROGRESS) → 840029f1 (probe cleanup;
+   4 untracked `probe*.mjs` + `oidc_v9probe*.mjs` in `services/web/` + the tracked `e2e_probe.mjs`
+   which stays committed per prior decision — it's the e2e evidence file) → eef3de7d (docker
+   migrations) → 1ec14289 (live smoke) → e652c0d9 (timeout knobs + killOutstandingCodes) →
+   45cb2ea7 (frontend invite preview + admin UI) → 47f7a583 (allowFederatedProjectCreate) →
+   1cd853cb (requireAdminApproval queue) → 0fa0f9f3 (admin pages + wizards).
+
+### In-flight: two-instance integration test — what's next
+- File to write next: `modules/federation/test/unit/integration/two-instance.sequential.test.mjs`
+  (design fully LOCKED above; the mock shape is already proven by S2sRouter.test.mjs +
+  keystore.test.mjs patterns that this session re-verified by re-reading both files).
+- The `probe9_dance.mjs` (scratch, `services/web/` untracked) is the executable reference for
+  the 6-step dance + cookie jar + fetch wrapper shape. Delete it + the other probe scratch
+  (`probe_dbg2.mjs`, `oidc_mount_probe.mjs`, `oidc_v9probe.mjs`, `oidc_v9probe4.mjs`) at the
+  840029f1 cleanup step AFTER the integration test is green (they're evidence for the handoff —
+  do not delete before the test is green; if the test needs a re-probe, `probe9_dance.mjs` is
+  still here).
+
+---
+
+# SESSION 7 (2026-09-20): verify.mjs bug fix + integration-test recon CLOSED (file NOT yet written correctly)
+
+## DONE this session
+1. **BUG FOUND + FIXED in `oidf/verify.mjs`** (was committed-correct-by-mistake; now genuinely correct).
+   `@oidfed/core` `verifyClientAssertion(...)` resolves a **`Result` union**, NOT the assertion
+   directly: `{ ok:true, value } | { ok:false, error }`. The committed code treated the resolved
+   Promise as the assertion and read `.ok` / `.error` on the wrong level, so a VALID assertion
+   landed in the `!verified.ok` branch → every valid `authorize-invite`/`revoked`/`replay`
+   S2S call returned 401 `bad-signature`. Fix (uncommitted, in git status as `M`):
+   ```js
+   const result = await verifyClientAssertion(assertion, anchorJwks, getS2sEndpoint(), { clockSkewSeconds })
+   if (!result.ok) { return { ok:false, code:'bad-signature', detail: result.error?.description || '...' } }
+   const verified = result.value   // ← the VerifiedClientAssertion
+   ```
+   `verified` is `{ clientId, issuedAt, expiresAt, jti? }`; downstream `iss === sub` uses
+   `payload.iss === payload.sub` — UNCHANGED. This is a REAL bug the unit S2s tests masked because
+   they mock `verifyS2sClientAssertion` and never exercise npm `verifyClientAssertion` for real.
+   **This file must be committed with the integration-test batch.**
+
+2. **Recon for the two-instance integration test: 100% COMPLETE.** Every module contract
+   re-verified this session (re-read, not assumed). The broken stub + its errors are catalogued
+   below; write the FINAL file from scratch against this list — do NOT salvage the stub.
+
+## ⚠️ Current state of the target file (DO NOT trust it)
+`test/unit/integration/two-instance.sequential.test.mjs` currently contains a **BROKEN STUB**
+(never green). Errors in the stub (all confirmed this session):
+- wrong Settings mock path: stub used `vi.mock('../../../app/src/infrastructure/Settings.mjs')` —
+  the module imports `Settings` from npm **`@overleaf/settings`** (aliased). Mock it as
+  `vi.mock('@overleaf/settings', ...)`.
+- calls `keystore._bootstrapOidcKey(...)` + `_bootstrapFederationKey(...)` — **do NOT exist**.
+  Use the real `keystore.ensureBootstrapped()` (seeds BOTH purposes) against a mocked
+  `FederationKey`, OR seed `FederationKey.create(...)` docs directly and call
+  `keystore._clearKeySetCache()`.
+- imports `CollaborationHandler` — the real file is **`CollaboratorsHandler.mjs`**.
+- `buildS2sRequest` uses 2 positional args (`origin, payload`) — the real signature is
+  **3 positional** `buildS2sRequest(peerOrigin, action, payload)` returning `{headers, body}`.
+- indented with TABS (repo prettier = 2-space, no tabs). Rewrite clean.
+- `globalThis.__REDIS` fake does NOT return `'OK'` from `set(k,v,opts)` — `verify.mjs` REPLAY
+  path does `assert redis.set(...) === 'OK'`; a `null` return reads as a replay → 401. `set`
+  MUST return `'OK'`.
+- stub uses `app.use(mount, provider.callback())` directly on express. probe9 proved this works,
+  but the module's own mount is the async wrapper (`getOidcProvider()` then `provider.callback()`);
+  for the test, mounting `app.use('/federation/oidc', (req,res,next)=>{ p.callback()(req,res,next) })`
+  is fine and matches the probe (express-compatible, zero `req.session` in v9).
+- file location is correct (`test/unit/integration/`) and matches the Sequential vitest project;
+  NO config change needed.
+
+## CONFIRMED contracts (this session) — write the file against these
+- **`vi.mock` path conventions** (from file `test/unit/integration/`): module-local = 3 up
+  (`'../../../app/models/FederationPeer.mjs'`, `'../../../util/Audit.mjs'`, etc.); `app/src` =
+  **5 up** (`'../../../../../app/src/infrastructure/RedisWrapper.mjs'`,
+  `'../../../../../app/src/models/User.mjs'`, `'../../../../../app/src/models/CollaboratorsHandler.mjs'`).
+  npm packages by package name: `@overleaf/settings`, `@overleaf/logger` (bootstrap already vi.mocks
+  logger+metrics as `vi.fn` stubs — the test can rely on those, no need to re-mock them).
+- **vi.mock factory CANNOT reference module-scope vars** (hoisting). Use `globalThis.__*`
+  thunks for mutable state (`__REDIS`, `__users`, `__peers`, `__auditRows`, `__grants`, `__FK`,
+  `__invites`). `RedisWrapper` mock: `{ default: { client: (_f)=>globalThis.__REDIS,
+  cleanupTestRedis: async()=>{} } }`.
+- **`FederationPeer` is NAMED-only** ({ export: FederationPeer }); **`FederationKey` has BOTH
+  default + named.** Model mocks: thenable objects with `.lean()/.sort()` returning `Promise`;
+  `.findOne(f).lean()`, `.find(f).sort().lean()`, `.create()`, `.updateOne(filter, update,
+  opts) => {matchedCount, modifiedCount}`.
+- **`User` is NAMED** (`import { User }`). ONE mock object must serve every finder the flow uses:
+  `findOne({email})`, `findOne({_id})`, `findOne({'federation.origin','federation.localName'})`,
+  `findOne({federation:{origin,localName}})`, `create(doc)` (auto-`_id`), `find({federation:{...}})`,
+  `findById`. Dispatch on filter keys BEFORE the catch-all.
+- **S2sRouter** is express-style (`webRouter.post('/federation/s2s', fn(req,res,next))`,
+  `res.status(...).json(...)`), reads headers via `req.get('client_assertion')`, dispatches
+  `action.handler(req)`, default-exports `{ apply(webRouter), _handleS2sRequest, _actions }`.
+  Handler order: settings-gate → envelope-sanity → peer-lookup → `verifyS2sClientAssertion` →
+  rate-limit → action → audit → respond.
+- **S2S wire (real, 3-pos arg)** `buildS2sRequest(peerOrigin, 'invite'|'authorize-invite'|'revoke', payload)` → `{headers:{client_assertion: <JWT>, client_assertion_type:'urn:ietf:params:oauth:client-assertion-type:jwt'}, body:{action, from, to, ts, payload}}`. The test POSTs `{headers, body}` to `POST /federation/s2s` via the fetch wrapper.
+- **B-side verify**: `verifyS2sClientAssertion(assertion, from)` (2 args; peer lookup INTERNAL, no network). Replay prefix `federation:replay:<jti>` (SET `NX` → `'OK'`/`null`). kid-pinned check BEFORE signature → `unknown-kid` (no refetch in v1); wrong signature on known kid → `bad-signature`; peer `status!=='approved'` → `peer-not-approved`; then `verifyClientAssertion` (Result unwrap, fixed this session); then `iss===sub`; then `aud===S2sEndpoint`; then expiry; then replay.
+- **Client assertion iss/sub**: `getClientId() = 'urn:overleaf-federation:client:'+entityId` where `entityId='https://'+origin` = `https://beta.example` → `urn:overleaf-federation:client:beta.example`. SIGNED via keystore federation key (`createKeyProvider().getFederationKeySet()`, ACTIVE key) with `iss=sub=client ID`, `aud=getS2sEndpoint()` (`.../federation/s2s`), fresh `jti` (crypto.randomUUID), `exp` 5 min, SKEW 60s. **Peer row `kid` MUST = the ACTIVE federation key's kid** for the pin to match.
+- **keystore**: NO default export; named `ensureBootstrapped()`, `getFederationKeySet()` (cache), `oidcSigningKeys()`, `createKeyProvider()`, `_clearKeySetCache()`. `purpose` values `'federation'`|`'oidc'` (lowercase). `FederationKey` doc shape `{_id, purpose, kid, algorithm:'ES256', publicKey:{kty,crv,alg,use,'x','y'}, privateKey:{...,'d'}, state:'active', expiresAt, publishedAt, stateChangedAt}`. `generateSigningKey('ES256')` from `@oidfed/core` sets kid/alg/use on BOTH halves. Seed ONE doc per purpose, then `keystore._clearKeySetCache()`.
+- **oidc-provider v9** (createProvider.mjs): `new Provider('${origin}/federation/oidc', setup)` (TWO args, issuer string). `jwks:{ keys: oidcSigningKeys() }` (object, NOT array; v9 normalizes `alg`→ES256 and strips `d`). `clients: await buildOidcProviderClients()` (must be AWAITED — committed bug already fixed). Adapter factory `(modelName)=>createAdapter()`. `findAccount(ctx,sub,source) => { accountId, claims:(usage,scope,allowed,rejected)=>({sub:{value:sub}, ...})}` (claims MUST be a function). `interactions.url override REQUIRED` → `${SITE}/federation/oidc/interact/${uid}`. Mount: `app.use('/federation/oidc', (req,res,next)=>{ p.callback()(req,res,next) })` LAST. NO `express.urlencoded` (v9 reads raw stream for token).
+- **clients.mjs**: `FederationPeer.find({status:'approved'})` (PLAIN await, NO `.lean()`); maps to public-client entries `{ client_id:'urn:overleaf-federation:client:beta.example', redirect_uris:['https://beta.example/federation/oidc/rp/callback'], application_type:'web', token_endpoint_auth_method:'none', response_types:['code'], grant_types:['authorization_code'], scope:'openid'(string), id_token_signed_response_alg:'ES256' }`. `getOidcProvider()` is async memoized; `_resetForTest()`. Must run AFTER keystore bootstrap (v9 validates `jwks.keys[*].d` eagerly at `new`).
+- **bridge.mjs** (express, NAMED `mountBridge(webRouter)`): GET `/federation/oidc/interact/:uid` (duck-typed `interactionDetails` via a fake res + real req, Koa-context duck-typing works) — if `prompt.login` → `interactionFinished({login:{accountId: session user id}})`; else render `CONSENT_VIEW` (absolute path `path.resolve(__dirname,'../../views/consent.pug')`; test `res.render` is faked). POST `/interact/:uid/consent` → `Grant` create or `getGrantByUid` + `provider.interactionFinished({consent:{grantId}})`. POST `/interact/:uid/deny` → `interactionFinished({error:'access_denied'},{mergeWithLastSubmission:true})`. Session user id: `SessionManager.getSessionUserId(req.session)` / `req.session.user._id`.
+- **The v9 dance (empirically proven — probe9)**: auth 303→interact(uid1) [login] → GET interact(uid1) 303→auth/uid1 → GET auth/uid1 303→interact(uid2) [NEW uid] → GET interact(uid2) 200 HTML consent → POST interact(uid2)/consent 303→auth/uid2 → GET auth/uid2 302→redirect_uri?code&state (or error). Cookies `_interaction`+`_interaction_resume` must ride every hop. The `:uid` path param is DECORATIVE — provider resolves from the `_interaction` cookie. **PKCE mandatory for `token_endpoint_auth_method:'none'`.**
+- **CallbackRouter** (NAMED `handleCallback`, `webRouter.get('/federation/oidc/rp/callback')`): gate `Settings.federation.enabled` (off → 400 `federation-off`) → `consumePkceState(session, state, redis)` → `verifySignedState` → `exchange(intent.origin, {code, codeVerifier, intent})` → `User.findOne({'federation.origin','federation.localName'})` OR `User.create({...})` (mirror: email:'', hashedPassword:undefined, emails:[], federation:{origin,localName}) → `CollaboratorsHandler.promises.addUserIdToProject(projectId, null, mirror._id, privilege)` → `UserSessionsManager.promises.trackSession(...)` → audit(`federation_session_issued`) → 302 to `intent.url` (open-redirect guard: single-root relative, else `/`).
+- **CodeExchange.mjs** `exchange(peerOrigin, {code, codeVerifier, intent}, redis)`: fetch B JWKS `https://<origin>/federation/oidc/jwks` (5s timeout, cached `federation:jwks:<origin>` TTL 1800) → POST token `https://<origin>/federation/oidc/token` form (30s, `grant_type=authorization_code&client_id&code&redirect_uri&code_verifier`, PKCE verifier) → `jwtVerify(idToken, jwk, {issuer:'https://'+origin, audience:'urn:overleaf-federation:client:beta.example'})` → returns `{idToken: claims}`. The `globalThis.fetch` wrapper rewrites `https://beta.example/...` → live local origin for BOTH urls AND the S2S POST (callPeer in the invite controller + the token/jwks fetches). NO live Redis needed if redis is passed in directly to these functions.
+- **State.mjs**: `persistPkceState(session, {state, verifier, origin, intent}, redis)` (Redis key `federation:rp-state:<state>` + session slot) then `consumePkceState` (Redis-first, one-shot — after first consume the key is gone → second callback refuses `state-invalid`-ish 4xx). `signState`/`verifySignedState` HMAC with `Settings.security.sessionSecret`. PKCE state TTL 120s.
+- **RateLimitStore**: `_setRateLimitRedisClientForTest(client)` (test hook) OR pass redis to `checkRateLimit(redis, opts)`. Keys `federation:ratelimit:<action>:<origin>:<hash>`; budget 30/120s (authorize|invited), 5/1200s (revoke). 429 → `{allowed:false, retryAfterSeconds: ttl}`. The 429 test: seed `federation:ratelimit:authorize:beta.example:<hash>` to `30` (TTL 120) in fake redis, send ONE more valid `authorize-invite` → 429 `Allow-Retry-After`. `incr` returns a NUMBER (fake redis must implement `incr`/`expire`/`ttl`).
+- **Audit.mjs** `audit({operation, projectId, meta, req})` → `ProjectAuditLogEntry.create(...)` (fire-and-forget, catch→null). `projectId` must be a real ObjectId or `null` (CastError on opaque ref) — S2S receipts pass `projectId:null`. `AUDIT_TYPES`: `inviteApproved:'federated_invite_approved'`, `inviteDenied:'federated_invite_denied'`, `sessionIssued:'federation_session_issued'`, `trustRevoked:'federation_peer_trust_revoked'`.
+- **Anchor.mjs** (pure, NO Redis): `parseAnchor('alice@beta.example:beta.example') → {localName:'alice@beta.example', origin:'beta.example'}` (LAST-colon split), `formatAnchor`, `validateAnchor`, `saltedLocalNameHash(localName, origin)` (32-hex HMAC, `Settings.security.sessionSecret` salt). `Redact.mjs` (pure): `assertionMeta({iss,aud,jti})` (takes OBJECT), `redact()`, `publicJwks()` (strips `['d','p','q','dp','dq','qi']`).
+- **PrivilegeLevels** (pure): `{NONE:false, READ_ONLY:'readOnly', READ_AND_WRITE:'readAndWrite', REVIEW:'review', OWNER:'owner'}` + `OrderedPrivilegeLevels`.
+- **SessionManager** (`app/src/Features/Authentication/`): `getSessionUserId(req.session) → req.session.user?._id` (bridge uses it). `UserSessionsManager` at `app/src/Features/User/UserSessionsManager.mjs` (default export, `{promises: trackSession}` mocked).
+- **`getEntityId()`** needs `https:` (Settings.siteUrl `https://beta.example`); `Settings.security.sessionSecret` is used by BOTH `saltedLocalNameHash` AND `State` HMAC AND v9 `cookies.secret` — set it in the Settings mock for consistency.
+- **Settings mock** (module does `import Settings from '@overleaf/settings'` — DEFAULT export,
+  npm name): mock `{ default: {siteUrl:'https://beta.example', security:{sessionSecret:'<32 bytes>'},
+  federation:{enabled:true, keyRotationGraceDays:14, institutionAuthorityHints:[]},
+  redis:{web:{host:'127.0.0.1'}} } }`. For the federation-OFF scenario, flip
+  `Settings.federation.enabled=false` via the mock's live getter / a `globalThis.__SETTINGS`
+  delegate (S2sRouter.test.mjs proves the toggle pattern; the factory must NOT capture a frozen
+  snapshot if a later scenario flips the gate).
+
+## Scenario set (final) for the test file (map to HANDOFF SESSION 6 item 3)
+1. Happy path: `FederatedInviteController.handleAuthorize(fakeReq, fakeRes)` IN-PROCESS (mocks: CollaboratorsGetter, User, FederationPeer gate, buildS2sRequest REAL→signed, callPeer→fetch→S2S oracle authorize) → yields `{authUrl, state, ...}`. Then drive the 6-step dance with fetch wrapper + cookie jar from `authUrl`. On final callback GET assert: mirror `User` row (`federation:{origin,localName}`), `CollaboratorsHandler.promises.addUserIdToProject(projectId, null, mirror._id, 'readAndWrite')` captured, `UserSessionsManager.promises.trackSession` called, audit `federation_session_issued`, final 302 Location = `intent.url` (seed a single-root relative like `/project/proj-1`).
+2. PKCE one-shot: replay SAME `state`+`code` on the callback → 4xx (Redis state consumed). Assert the exact status/shape from `CallbackRouter` error path.
+3-11: the `invited`/approve/deny/replay(401)/bad-sig(401)/unknown-kid(401)/rate-limit(429)/revoke+idempotent+followup(401)/federation-off(200) S2S scenarios via `buildS2sRequest`→fetch POST→assert status+body+audit, with `globalThis.__REDIS.flushall()` between each to isolate rate-limit/replay counters.
+
+## Next (immediate)
+1. **WRITE the final** `test/unit/integration/two-instance.sequential.test.mjs` against the contracts above (fresh; discard the broken stub). Run `npx vitest run --project Sequential two-instance` from `services/web/`; iterate to green. Then `git add` it + `oidf/verify.mjs` (the bug fix) — NEVER `git add -A` — commit + push. Probe scratch (`probe9_dance.mjs`, `probe_dbg2.mjs`, etc.) stays until that test is green (evidence), deleted in the 840029f1 step.
+- The `e2e_probe.mjs` (tracked, committed) stays. It's the module-trust evidence file and is
+  referenced by the HANDOFF as part of the "verified working" set.
+# SESSION 8 (2026-09-20): integration test WRITTEN + GREEN (12/12) — recon CLOSED, anti-loop honored
+
+## OUTCOME
+`modules/federation/test/unit/integration/two-instance.sequential.test.mjs` is **WRITTEN + 12/12 GREEN**,
+ESLint clean. The recon was genuinely closed at SESSION 7; this session wrote the file, iterated
+against real test output (NOT recon), and closed it. Anti-loop honored: recon is FROZEN; what got
+re-read this session was only (a) the two failing dance sites + (b) one targeted grep of the
+`CallbackRouter` 401 refusal shape to pin the assertion. No full-file re-reads; no second verification
+pass.
+
+## The 12 scenarios (all green)
+1. OIDC code dance (full happy path): in-proc `handleAuthorize` → fetch → live oidc-provider v9
+   interact/consent/code → callback → mirror User row + collaborator grant + session + audit + 302
+2. PKCE one-shot: replayed (code,state) → 401 `invalid grant request`
+3. S2S invited approved (existing local user) + displayName
+4. S2S invited soft-deny (nonexistent local user, still `ok:true`)
+5. S2S authorize-invite approved + audit row
+6. S2S authorize-invite unknown invitee → business refusal + audit row
+7. S2S replay: second delivery of same assertion → 401 `replay-jti`
+8. S2S bad signature → 401 `bad-signature`
+9. S2S unknown kid (key not pinned) → 401 `unknown-kid`
+10. S2S rate limit: budget exceeded → 429 + `Allow-Retry-After`
+11. S2S revoke: trust revoked (idempotent), follow-up refused `peer-not-approved`, audit row
+12. S2S federation off → 200 `code:'federation-off'`
+
+## How the dance is driven (probe9-derived, now in the committed test)
+- Single live express app plays BOTH A (RP) and B (home OP). Trust model — single-origin variant:
+  `A.origin === B.origin === beta.example` (`Settings.siteUrl`), so A fetches `https://beta.example/...`
+  and a `globalThis.fetch` wrapper rewrites to the live local origin (token + JWKS + S2S).
+- REAL: oidc-provider v9.12.2 dance (auth → interact/<uid> → login auto → consent.pug render →
+  consent → code → callback), real jose ES256 keystore, real client assertions, replay dedup,
+  rate limit. MOCKED: the 4 app/src models + 3 services + Redis (Map fake, `@overleaf/redis-wrapper`
+  contract incl. `set EX|PX|NX`, `incr`, `ttl`). `vi.mock` factories read `globalThis.__*` stores
+  (hoisting-safe).
+- `runAuthorize` runs `handleAuthorize` IN-PROCESS (fake req/res) to capture the 302 `authUrl`
+  (skips the CSRF router guard) and asserts the redirect; `driveDance` fetches with a cookie jar,
+  stops at the final 302 to `/federation/oidc/rp/callback?code&state`, callback GET asserts.
+- Consent rendered by a stubbed `res.render` (pug) — the bridge's `renderConsent` path is exercised
+  for real (locals: title/client_id/uid/grantUrl/denyUrl); the form is NOT followed here (the probe
+  already proved the redirect chain). The callback is driven by `driveDance`'s returned (code, state).
+- Rate-limit test seeds `federation:ratelimit:authorize:beta.example:<hash>` = 30 (TTL 120) then ONE
+  more valid `authorize-invite` → 429 + `Allow-Retry-After`. Replay test re-sends the same assertion.
+
+## Failure signatures fixed this session (≤3 iterations each, recon NOT re-opened)
+1. `seedStore` `undefined.length` (`__GRANTS`/`__SESSIONS` not yet seeded) → guard init all `__*` in
+   `seedStore`.
+2. `consent.pug` ENOENT (pug `renderFile` got the view-name string, not a path) → resolve view to an
+   absolute `path.resolve(__dirname, '../../app/views/consent.pug')` before render.
+3. `Invalid URL` (driveDance `new URL` on a relative `code`-less URL) + callback `Invalid URL` →
+   resolve every Location against `beta.example` (absolute `https://beta.example<loc>`) instead of
+   assuming absolute. The callback URL is built from the resolved (code, state), not a raw Location.
+
+## Files changed (this session)
+- `test/unit/integration/two-instance.sequential.test.mjs` (NEW — full 12-scenario file, green)
+- `HANDOFF.md` (this SESSION 8 closeout + TODO-a9c6dd79 → CLOSED)
+- (uncommitted `oidf/verify.mjs` bug fix from SESSION 7 is the SAME change — kept in this work; the
+  fix is required for ALL valid S2S calls and is exercised by the green S2S scenarios above, so the
+  two-instance test is now the live proof that the fix is correct.)
+
+## Anti-loop discipline (what to enforce next session — DO NOT re-run recon)
+- Recon is CLOSED. Do NOT re-read `verify.mjs` / `S2sRouter` / `bridge` / `state` / keystore.
+- If a future scenario is added, read ONLY the new failing line + the one source it references.
+- The probe files (`probe9_dance.mjs`, `probe_dbg2.mjs`, `probe2/3/7/8/10*.mjs`, `oidc_v9probe*.mjs`)
+  are NOW REDUNDANT once this test is committed — they are the evidence, deleted in TODO-840029f1.
+  `e2e_probe.mjs` (tracked) STAYS (module-trust evidence, referenced by HANDOFF).
+
+## Next (immediate — post green)
+- `git add` the test file + `oidf/verify.mjs` + this HANDOFF — NEVER `git add -A` (probes stay
+  untracked until TODO-840029f1). Commit + push.
+- Mark TODO-a9c6dd79 complete.
+
+

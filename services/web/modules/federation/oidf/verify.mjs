@@ -129,20 +129,21 @@ export async function verifyS2sClientAssertion(assertion, from) {
   // aud = our S2S endpoint (03 §2 step 2, fixed per instance, 03 §8).
   const anchorJwks =
     typeof peer.anchorJwks === 'string' ? JSON.parse(peer.anchorJwks) : peer.anchorJwks
-  const verified = await verifyClientAssertion(
+  const result = await verifyClientAssertion(
     assertion,
     anchorJwks,
     getS2sEndpoint(),
     { clockSkewSeconds: CLOCK_SKEW_SECONDS },
   )
-  if (!verified.ok) {
+  if (!result.ok) {
     return {
       ok: false,
       code: 'bad-signature',
       detail:
-        verified.error?.description || 'client assertion verification failed',
+        result.error?.description || 'client assertion verification failed',
     }
   }
+  const verified = result.value
 
   // (3b) iss == the caller's client id (03 §2 step 2). The S2S wire's `from`
   //     is the caller's ORIGIN (FQDN without port/scheme, 03 §2 body
