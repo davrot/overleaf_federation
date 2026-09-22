@@ -1,6 +1,6 @@
 # 10 — eduGAIN / DFN-AAI (SAML) + GEANT AAI (OIDC) interop
 
-> Status: PLANNING — v3 (2026-09-22, decisions locked §6). Paused goal
+> Status: P1a (fe4 SSO framework port) DONE, P1b (N-provider dispatch) DONE (2026-09-22). Next: P1c (attrFilter) → Phase 0/2 (eduGAIN SAML via Shibboleth proxy). Paused goal
 > `3ea7bb53` — content-bridge 2a–2d queued behind this.
 > Primary sources: DFN-AAI doku (doku.tid.dfn.de); GEANT AAI Confluence export
 > (`/home/davrot/edugain`, extracted at `/tmp/edugain_txt/`); upstream
@@ -447,7 +447,7 @@ App changes, discrete commits pushed:
 | N2 | `ssoConfigs` key must land in MIGRATION lib `db` map (v1 static-map learning) | Add `ssoConfigs` to `tools/migrations/lib/mongodb.mjs`; runtime already covered after port. **No `emailConfigs`** (SSO-only) |
 | N3 | Passport strategy name collision stock vs ours | Ours uses `oidc-provider` (provider-side, no passport); stock OIDC uses passport `openidconnect` — no expected clash; **verify on port** |
 | N4 | passport state-store collision under per-strategy | **CLOSED 2026-09-22:** passport-oauth2 state store key = `sessionKey || 'oauth2:' + hostname(authorizationURL)` (strategy.js:103) — derived from issuer URL, NOT strategy name. Per-provider strategies (different issuers) ⇒ distinct keys, no collision. passport-saml `extce` is per-login session. No action. |
-| N5 | *(new)* passport-saml strategy named registration | OPEN (recon in P1b build: `super()` in strategy.js sets no name ⇒ plain `passport.use('saml-<id>', new SAMLStrategy(...))` expected to work; verify in unit). passport-strategy instance supports `.name` per-instance. |
+| N5 | *(new)* passport-saml strategy named registration | **CLOSED 2026-09-22:** `super()` in @node-saml/passport-saml strategy.js:28 sets no `.name` (verified at runtime via live probe) ⇒ plain `passport.use('saml-<id>', new SAMLStrategy({options}))` works; per-instance `.name` override available. Eviction via `passport._strategies[id] = undefined` (no public API; `passport.unuse` only clears default-named strategies). |
 | G4 | "blocked" row applied retroactively to **existing** users | Re-evaluated on next login only; not enforced mid-session (admin can force via session wipe — documented) |
 | G5 | `attrFilter` regex row — no ReDoS guard | Document `values` should be simple; ≤10 rows per default |
 | G6 | OIDC userinfo-only claims (e.g. GEANT `entitlements`) | Extra HTTP fetch at JIT only when required; recon: passport-openidconnect profile surface, token availability post-redirect; timeout |
