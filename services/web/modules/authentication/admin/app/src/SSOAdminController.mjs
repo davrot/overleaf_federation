@@ -160,8 +160,14 @@ const SSOAdminController = {
         { upsert: true }
       )
       clearConfigCache()
+      // Evict strategies for providers that were disabled/removed (lazy
+      // re-registration on next login picks up the new state — no restart needed)
+      const enabledIds = new Set((sanitized.providers || []).filter(p => p.enabled).map(p => p.id))
+      for (const p of existing.providers || []) {
+        if (!enabledIds.has(p.id)) await _evictProvider(p)
+      }
       logger.info({}, 'SSO configuration saved')
-      res.json({ success: true, message: 'Configuration saved. Restart the server for changes to take effect.' })
+      res.json({ success: true, message: 'Configuration saved.' })
     } catch (error) {
       logger.error({ error }, 'Failed to save SSO config')
       res.status(500).json({ error: 'Failed to save SSO configuration' })
@@ -200,12 +206,15 @@ const SSOAdminController = {
     try {
       const { providerId } = req.params
       const config = await _getConfig()
+      const removed = config.providers.find(p => p.id === providerId)
       config.providers = config.providers.filter(p => p.id !== providerId)
       await db.ssoConfigs.replaceOne(
         { _id: SSO_CONFIG_ID },
         config,
         { upsert: true }
       )
+      clearConfigCache()
+      if (removed) await _evictProvider(removed)
       res.json({ success: true })
     } catch (error) {
       logger.error({ error }, 'Failed to delete provider')
@@ -282,6 +291,20 @@ const SSOAdminController = {
       res.json({ success: false, message: `Test failed: ${error.message}` })
     }
   },
+}
+
+async function _evictProvider(provider) {
+  try {
+    if (provider.type === 'saml') {
+      const { default: SAMLModuleManager } = await import('../../saml/app/src/SAMLModuleManager.mjs')
+      SAMLModuleManager.evictStrategy(provider.id)
+    } else if (provider.type === 'oidc') {
+      const { default: OIDCModuleManager } = await import('../../oidc/app/src/OIDCModuleManager.mjs')
+      OIDCModuleManager.evictStrategy(provider.id)
+    }
+  } catch (e) {
+    logger.warn({ e, providerId: provider.id }, 'Failed to evict provider strategy')
+  }
 }
 
 async function _getConfig() {

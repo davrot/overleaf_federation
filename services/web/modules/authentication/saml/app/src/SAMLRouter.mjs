@@ -8,7 +8,10 @@ export default {
   apply(webRouter) {
     logger.debug({}, 'Init SAML router')
     webRouter.get('/saml/login', SAMLAuthenticationController.passportLogin)
+    webRouter.get('/saml/login/:providerId', SAMLAuthenticationController.passportLogin)
     AuthenticationController.addEndpointToLoginWhitelist('/saml/login')
+    // per-provider login URLs (N-provider)
+    AuthenticationController.addEndpointToLoginWhitelist(/^\/saml\/login\/[^/]+$/)
     webRouter.get('/saml/meta', SAMLAuthenticationController.getSPMetadata)
     AuthenticationController.addEndpointToLoginWhitelist('/saml/meta')
     webRouter.post('/logout', logout, UserController.logout)

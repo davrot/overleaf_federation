@@ -8,8 +8,12 @@ export default {
   apply(webRouter) {
     logger.debug({}, 'Init OIDC router')
     webRouter.get('/oidc/login', OIDCAuthenticationController.passportLogin)
-    AuthenticationController.addEndpointToLoginWhitelist('/oidc/login')
     webRouter.get('/oidc/login/callback', OIDCAuthenticationController.passportLoginCallback)
+    // per-provider (N-provider): registered AFTER the callback route so /
+    // oidc/login/callback is not captured by :providerId
+    webRouter.get('/oidc/login/:providerId', OIDCAuthenticationController.passportLogin)
+    AuthenticationController.addEndpointToLoginWhitelist('/oidc/login')
+    AuthenticationController.addEndpointToLoginWhitelist(/^\/oidc\/login\/[^/]+$/)
     AuthenticationController.addEndpointToLoginWhitelist('/oidc/login/callback')
     webRouter.get('/oidc/logout/callback', OIDCAuthenticationController.passportLogoutCallback)
     webRouter.post('/user/oauth-unlink', OIDCAuthenticationController.unlinkAccount)

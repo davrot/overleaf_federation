@@ -440,16 +440,25 @@ const AuthenticationController = {
   },
 
   _globalLoginWhitelist: [],
+  /**
+   * Whitelist a login-redirecting endpoint. Accepts:
+   *  - a string (exact path match, as before) or
+   *  - a RegExp (pattern match, e.g. per-provider /saml/login/:providerId).
+   * The entry is matched against the resolved pathname of the request.
+   */
   addEndpointToLoginWhitelist(endpoint) {
     return AuthenticationController._globalLoginWhitelist.push(endpoint)
   },
 
   requireGlobalLogin(req, res, next) {
-    if (
-      AuthenticationController._globalLoginWhitelist.includes(
-        req._parsedUrl.pathname
-      )
-    ) {
+    const pathname = req._parsedUrl?.pathname || req.path || req.url.split('?')[0]
+    const isWhitelisted = AuthenticationController._globalLoginWhitelist.some((entry) => {
+      if (typeof entry === 'string') return entry === pathname
+      if (entry instanceof RegExp) return entry.test(pathname)
+      return entry(pathname)
+    })
+
+    if (isWhitelisted) {
       return next()
     }
 

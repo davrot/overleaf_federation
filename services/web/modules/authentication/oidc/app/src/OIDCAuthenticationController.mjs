@@ -5,59 +5,86 @@ import AuthenticationController from '../../../../../app/src/Features/Authentica
 import UserController from '../../../../../app/src/Features/User/UserController.mjs'
 import ThirdPartyIdentityManager from '../../../../../app/src/Features/User/ThirdPartyIdentityManager.mjs'
 import OIDCAuthenticationManager from './OIDCAuthenticationManager.mjs'
+import OIDCModuleManager from './OIDCModuleManager.mjs'
 
 const OIDCAuthenticationController = {
-  passportLogin(req, res, next) {
+  /**
+   * GET /oidc/login (env fallback) and GET /oidc/login/:providerId (DB providers).
+   * Sets req.session.oidcProviderId — the callback dispatches per session.
+   */
+  async passportLogin(req, res, next) {
     req.session.intent = req.query.intent
-    passport.authenticate('openidconnect')(req, res, next)
+    const providerId = req.params.providerId || Settings.oidc?._firstProviderId || Settings.oidc?.providerId || 'oidc'
+    req.session.oidcProviderId = providerId
+    try {
+      await OIDCModuleManager.ensureStrategy(providerId)
+      const strategyId = OIDCModuleManager.strategyIdForProviderId(providerId)
+      if (!passport._strategy(strategyId)) {
+        return res.status(404).send(`OIDC provider '${providerId}' not found or disabled`)
+      }
+      passport.authenticate(strategyId)(req, res, next)
+    } catch (err) {
+      next(err)
+    }
   },
-  passportLoginCallback(req, res, next) {
-    passport.authenticate(
-      'openidconnect',
-      { keepSessionInfo: true },
-      async function (err, user, info) {
-        if (err) {
-          return next(err)
-        }
-        if(req.session.intent === 'link') {
-          delete req.session.intent
-// After linking, log out from the OIDC provider and redirect back to '/user/settings'.
-// Keycloak supports this; Authentik does not (yet).
-          const logoutUrl = Settings._oidcDbProvider?.logoutURL || process.env.OVERLEAF_OIDC_LOGOUT_URL
-          const redirectUri = `${Settings.siteUrl.replace(/\/+$/, '')}/user/settings`
-          return res.redirect(`${logoutUrl}?id_token_hint=${info.idToken}&post_logout_redirect_uri=${encodeURIComponent(redirectUri)}`)
-	}
-        if (user) {
-          req.session.idToken = info.idToken
-          user.externalAuth = 'oidc'
-          // `user` is either a user object or false
-          AuthenticationController.setAuditInfo(req, {
-            method: 'OIDC login',
-          })
-          try {
-            await AuthenticationController.promises.finishLogin(user, req, res)
-          } catch (err) {
+  async passportLoginCallback(req, res, next) {
+    // This function is middleware which wraps the passport.authenticate middleware,
+    // so we can send back our custom `{message: {text: "", type: ""}}` responses on failure,
+    // and send a `{redir: ""}` response on success
+    const providerId = req.session.oidcProviderId || Settings.oidc?._firstProviderId || Settings.oidc?.providerId || 'oidc'
+    try {
+      await OIDCModuleManager.ensureStrategy(providerId)
+      const strategyId = OIDCModuleManager.strategyIdForProviderId(providerId)
+      passport.authenticate(
+        strategyId,
+        { keepSessionInfo: true },
+        async function (err, user, info) {
+          if (err) {
             return next(err)
           }
-        } else {
-          if (info.redir != null) {
-            await UserController.doLogout(req)
-            return res.redirect(info.redir)
+          if (req.session.intent === 'link') {
+            delete req.session.intent
+            // After linking, log out from the OIDC provider and redirect back to '/user/settings'.
+            // Keycloak supports this; Authentik does not (yet).
+            const logoutUrl = Settings._oidcDbProvider?.logoutURL || process.env.OVERLEAF_OIDC_LOGOUT_URL
+            const redirectUri = `${Settings.siteUrl.replace(/\/+$/, '')}/user/settings`
+            return res.redirect(`${logoutUrl}?id_token_hint=${info.idToken}&post_logout_redirect_uri=${encodeURIComponent(redirectUri)}`)
+          }
+          if (user) {
+            req.session.idToken = info.idToken
+            user.externalAuth = 'oidc'
+            // `user` is either a user object or false
+            AuthenticationController.setAuditInfo(req, {
+              method: `OIDC login - ${providerId}`,
+            })
+            try {
+              await AuthenticationController.promises.finishLogin(user, req, res)
+            } catch (err) {
+              return next(err)
+            }
           } else {
-            res.status(info.status || 401)
-            delete info.status
-            const body = { message: info }
-            return res.json(body)
+            if (info.redir != null) {
+              await UserController.doLogout(req)
+              return res.redirect(info.redir)
+            } else {
+              res.status(info.status || 401)
+              delete info.status
+              const body = { message: info }
+              return res.json(body)
+            }
           }
         }
-      }
-    )(req, res, next)
+      )(req, res, next)
+    } catch (err) {
+      next(err)
+    }
   },
   async doPassportLogin(req, issuer, uiProfile, idProfile, context, idToken, accessToken, refreshToken, params, done) {
     const profile = uiProfile ?? idProfile //id Profile if _skipUserProfile is true
     let user, info
+    const providerId = req.session.oidcProviderId || Settings.oidc?._firstProviderId || Settings.oidc?.providerId || 'oidc'
     try {
-      if(req.session.intent === 'link') {
+      if (req.session.intent === 'link') {
         ;({ user, info } = await OIDCAuthenticationController._doLink(
           req,
           profile
@@ -65,7 +92,8 @@ const OIDCAuthenticationController = {
       } else {
         ;({ user, info } = await OIDCAuthenticationController._doLogin(
           req,
-          profile
+          profile,
+          { providerId }
         ))
       }
     } catch (error) {
@@ -79,16 +107,16 @@ const OIDCAuthenticationController = {
     }
     return done(null, user, info)
   },
-  async _doLogin(req, profile) {
+  async _doLogin(req, profile, { providerId } = {}) {
     const { fromKnownDevice } = AuthenticationController.getAuditInfo(req)
     const auditLog = {
       ipAddress: req.ip,
-      info: { method: 'OIDC login', fromKnownDevice },
+      info: { method: `OIDC login - ${providerId}`, fromKnownDevice },
     }
 
     let user
     try {
-      user = await OIDCAuthenticationManager.promises.findOrCreateUser(profile, auditLog)
+      user = await OIDCAuthenticationManager.promises.findOrCreateUser(profile, auditLog, { providerId })
     } catch (error) {
       logger.debug({ email : profile.emails[0].value }, `OIDC login failed: ${error}`)
       return {
@@ -115,12 +143,13 @@ const OIDCAuthenticationController = {
   },
   async _doLink(req, profile) {
     const { user: { _id: userId }, ip } = req
+    const providerId = req.session.oidcProviderId || Settings.oidc?._firstProviderId || Settings.oidc?.providerId || 'oidc'
     try {
       const auditLog = {
         ipAddress: ip,
         initiatorId: userId,
       }
-      await OIDCAuthenticationManager.promises.linkAccount(userId, profile, auditLog)
+      await OIDCAuthenticationManager.promises.linkAccount(userId, profile, auditLog, { providerId })
     } catch (error) {
       logger.error(error.info, error.message)
       return {
@@ -148,17 +177,17 @@ const OIDCAuthenticationController = {
       return next({ stack: error.stack, info: {userId: req.user?._id} })
     }
   },
+  /**
+   * Logout (per-provider where possible).
+   */
   async passportLogout(req, res, next) {
-// TODO: instead of storing idToken in session, use refreshToken to obtain a new idToken?
+    // TODO: instead of storing idToken in session, use refreshToken to obtain a new idToken?
     const idTokenHint = req.session.idToken
     await UserController.doLogout(req)
     const logoutUrl = Settings._oidcDbProvider?.logoutURL || process.env.OVERLEAF_OIDC_LOGOUT_URL
     const redirectUri = Settings.siteUrl
     res.redirect(`${logoutUrl}?id_token_hint=${idTokenHint}&post_logout_redirect_uri=${encodeURIComponent(redirectUri)}`)
   },
-  passportLogoutCallback(req, res, next) {
-    const redirectUri = Settings.siteUrl
-    res.redirect(redirectUri)
-  },
 }
+
 export default OIDCAuthenticationController

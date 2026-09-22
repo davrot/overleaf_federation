@@ -1,6 +1,6 @@
 import logger from '@overleaf/logger'
 import SSOAdminController from './SSOAdminController.mjs'
-import { getEnabledProviders, getLoginPageSettings, isLDAPEnabled } from '../../../ssoConfigLoader.mjs'
+import { getEnabledProviders, getLoginPageSettings, isLDAPEnabled, isDbMode } from '../../../ssoConfigLoader.mjs'
 import AuthorizationMiddleware from '../../../../../app/src/Features/Authorization/AuthorizationMiddleware.mjs'
 import Settings from '@overleaf/settings'
 
@@ -16,8 +16,11 @@ export default {
         const ldapEnabled = await isLDAPEnabled()
         res.locals.ssoProviders = providers.map(p => ({
           type: p.type,
+          id: p.id,
           buttonLabel: p.buttonLabel || p.name || `Log in with ${p.type.toUpperCase()}`,
-          loginUrl: p.type === 'saml' ? '/saml/login' : '/oidc/login',
+          loginUrl: !isDbMode() || !p.id
+            ? (p.type === 'saml' ? '/saml/login' : '/oidc/login')
+            : (p.type === 'saml' ? `/saml/login/${p.id}` : `/oidc/login/${p.id}`),
         }))
         res.locals.ssoLoginPage = loginSettings
         res.locals.ssoLdapEnabled = ldapEnabled || !!(Settings.ldap && Settings.ldap.enable)

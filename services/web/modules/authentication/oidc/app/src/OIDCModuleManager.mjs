@@ -1,43 +1,66 @@
 import logger from '@overleaf/logger'
 import Settings from '@overleaf/settings'
+import passport from 'passport'
 import { boolFromEnv } from '../../../utils.mjs'
-import { getOIDCProviderConfig } from '../../../ssoConfigLoader.mjs'
+import { getOIDCProviderConfig, getProviderById, loadSSOConfig } from '../../../ssoConfigLoader.mjs'
 import PermissionsManager from '../../../../../app/src/Features/Authorization/PermissionsManager.mjs'
 import OIDCAuthenticationController from './OIDCAuthenticationController.mjs'
 import { Strategy as OIDCStrategy } from 'passport-openidconnect'
 
+/**
+ * N-provider OIDC manager (P1b).
+ *
+ *  - ENV mode (EXTERNAL_AUTH=oidc + OVERLEAF_OIDC_*): ONE synthetic provider,
+ *    strategy name 'openidconnect' (stock), providerId env/default — byte-identical
+ *    to the pre-N module.
+ *  - DB mode (ssoConfigs doc): each enabled OIDC provider is a strategy named
+ *    'oidc-<id>', providerId = the provider's id. Registration is LAZY
+ *    (ensureStrategy) so an admin save/delete is picked up on the next login
+ *    with NO restart. The stock 'openidconnect' name is also bound so the
+ *    un-parameterised URL redirects to the first-enabled provider.
+ */
 const OIDCModuleManager = {
+  _registered: new Map(),
+
   async initSettings() {
-    const dbProvider = await getOIDCProviderConfig()
-    if (dbProvider) {
-      const providerId = dbProvider.providerID || 'oidc'
-      // Ensure oauthProviders entry exists for OIDC
-      if (!Settings.oauthProviders) Settings.oauthProviders = {}
-      Settings.oauthProviders[providerId] = {
-        name: dbProvider.providerName || dbProvider.name || 'OIDC Provider',
-        descriptionKey: dbProvider.providerDescription || undefined,
-        descriptionOptions: dbProvider.providerInfoLink ? { link: dbProvider.providerInfoLink } : undefined,
-        hideWhenNotLinked: !!dbProvider.hideWhenNotLinked,
-        linkPath: '/oidc/login',
-      }
+    const first = await getOIDCProviderConfig()
+    if (first) {
+      const config = await loadSSOConfig()
+      const providers = (config?.providers || []).filter(p => p.type === 'oidc' && p.enabled)
+      const firstProvider = providers[0] || first
       Settings.oidc = {
         enable: true,
-        providerId: providerId,
-        identityServiceName: dbProvider.identityServiceName || dbProvider.buttonLabel || `Log in with ${dbProvider.name}`,
-        attUserId:    dbProvider.userIdField || 'id',
-        attAdmin:     dbProvider.isAdminField || undefined,
-        valAdmin:     dbProvider.isAdminFieldValue || undefined,
-        updateUserDetailsOnLogin: !!dbProvider.updateUserDetailsOnLogin,
-        allowedOIDCEmailDomains: dbProvider.allowedEmailDomains
-          ? dbProvider.allowedEmailDomains.split(',').map(s => s.trim()).filter(Boolean)
-          : null,
+        _firstProviderId: firstProvider.id,
+        providers: Object.fromEntries(providers.map(p => [p.id, {
+          providerId: p.providerID || p.id,
+          identityServiceName: p.identityServiceName || p.buttonLabel || `Log in with ${p.name || 'OIDC'}`,
+          attUserId:    p.userIdField || 'id',
+          attAdmin:     p.isAdminField || undefined,
+          valAdmin:     p.isAdminFieldValue || undefined,
+          updateUserDetailsOnLogin: !!p.updateUserDetailsOnLogin,
+          allowedOIDCEmailDomains: p.allowedEmailDomains
+            ? p.allowedEmailDomains.split(',').map(s => s.trim()).filter(Boolean)
+            : null,
+        }])),
       }
-      Settings._oidcDbProvider = dbProvider
+      // keep the single-provider seam for existing readers (logout URL etc.)
+      Settings._oidcDbProvider = firstProvider
+      // keep oauthProviders entry for the first provider (link UI / descriptions)
+      const providerId = first.providerID || first.id
+      if (!Settings.oauthProviders) Settings.oauthProviders = {}
+      Settings.oauthProviders[providerId] = {
+        name: first.providerName || first.name || 'OIDC Provider',
+        descriptionKey: first.providerDescription || undefined,
+        descriptionOptions: first.providerInfoLink ? { link: first.providerInfoLink } : undefined,
+        hideWhenNotLinked: !!first.hideWhenNotLinked,
+        linkPath: `/oidc/login/${providerId}`,
+      }
     } else {
       let providerId = process.env.OVERLEAF_OIDC_PROVIDER_ID || 'oidc'
       Settings.oidc = {
         enable: true,
-        providerId:   providerId,
+        _firstProviderId: providerId,
+        providerId,   // legacy singleton read by the manager (env mode)
         identityServiceName: process.env.OVERLEAF_OIDC_IDENTITY_SERVICE_NAME || `Log in with ${Settings.oauthProviders[providerId]?.name || 'OIDC'}`,
         attUserId:    process.env.OVERLEAF_OIDC_USER_ID_FIELD || 'id',
         attAdmin:     process.env.OVERLEAF_OIDC_IS_ADMIN_FIELD,
@@ -49,46 +72,114 @@ const OIDCModuleManager = {
       }
     }
   },
-  passportSetup(passport, callback) {
-    const dbProvider = Settings._oidcDbProvider
-    let oidcOptions
-    if (dbProvider) {
-      oidcOptions = {
-        issuer: dbProvider.issuer,
-        authorizationURL: dbProvider.authorizationURL || undefined,
-        tokenURL: dbProvider.tokenURL || undefined,
-        userInfoURL: dbProvider.userInfoURL || undefined,
-        clientID: dbProvider.clientID,
-        clientSecret: dbProvider.clientSecret,
-        callbackURL: `${Settings.siteUrl.replace(/\/+$/, '')}/oidc/login/callback`,
-        scope: dbProvider.scope || 'openid profile email',
-        passReqToCallback: true,
-      }
-    } else {
-      oidcOptions = {
-        issuer: process.env.OVERLEAF_OIDC_ISSUER,
-        authorizationURL: process.env.OVERLEAF_OIDC_AUTHORIZATION_URL,
-        tokenURL: process.env.OVERLEAF_OIDC_TOKEN_URL,
-        userInfoURL: process.env.OVERLEAF_OIDC_USER_INFO_URL,
-        clientID: process.env.OVERLEAF_OIDC_CLIENT_ID,
-        clientSecret: process.env.OVERLEAF_OIDC_CLIENT_SECRET,
-        callbackURL: `${Settings.siteUrl.replace(/\/+$/, '')}/oidc/login/callback`,
-        scope: process.env.OVERLEAF_OIDC_SCOPE || 'openid profile email',
+
+  /**
+   * providerId -> strategy id. Env-mode synthetic 'oidc' -> stock
+   * 'openidconnect'; DB row ids -> 'oidc-<id>'. No global mode check — callers
+   * pass the resolved (session) provider id.
+   */
+  strategyIdForProviderId(providerId) {
+    if (!providerId || providerId === 'oidc') return 'openidconnect'
+    return `oidc-${providerId}`
+  },
+  /** strategy id -> providerId (inverse of the above). */
+  providerIdForStrategy(strategyId) {
+    return String(strategyId).startsWith('oidc-') ? strategyId.slice('oidc-'.length)
+      : Settings.oidc?.providerId || 'oidc'
+  },
+
+  /**
+   * Build passport-openidconnect strategy options for ONE provider.
+   * @param {object|null} provider  DB provider config; null => env (OVERLEAF_OIDC_*) fallback.
+   */
+  buildStrategyOptions(provider) {
+    const site = Settings.siteUrl.replace(/\/+$/, '')
+    const callbackURL = `${site}/oidc/login/callback`
+    if (provider) {
+      return {
+        issuer: provider.issuer,
+        authorizationURL: provider.authorizationURL || undefined,
+        tokenURL: provider.tokenURL || undefined,
+        userInfoURL: provider.userInfoURL || undefined,
+        clientID: provider.clientID,
+        clientSecret: provider.clientSecret,
+        callbackURL,
+        scope: provider.scope || 'openid profile email',
         passReqToCallback: true,
       }
     }
-    try {
-      passport.use(
-        new OIDCStrategy(
-          oidcOptions,
-          OIDCAuthenticationController.doPassportLogin
-        )
-      )
-      callback(null)
-    } catch (error) {
-      callback(error)
+    return {
+      issuer: process.env.OVERLEAF_OIDC_ISSUER,
+      authorizationURL: process.env.OVERLEAF_OIDC_AUTHORIZATION_URL,
+      tokenURL: process.env.OVERLEAF_OIDC_TOKEN_URL,
+      userInfoURL: process.env.OVERLEAF_OIDC_USER_INFO_URL,
+      clientID: process.env.OVERLEAF_OIDC_CLIENT_ID,
+      clientSecret: process.env.OVERLEAF_OIDC_CLIENT_SECRET,
+      callbackURL,
+      scope: process.env.OVERLEAF_OIDC_SCOPE || 'openid profile email',
+      passReqToCallback: true,
     }
   },
+
+  /**
+   * Lazily (re)register the strategy for the given provider (DB row id, or the
+   * env synthetic in env mode). In DB mode also binds the stock 'openidconnect'
+   * to the first-enabled provider (un-parameterised URLs redirect there).
+   */
+  async ensureStrategy(providerId) {
+    const first = await getOIDCProviderConfig()
+    if (first) {
+      const provider = providerId ? await getProviderById(providerId) : first
+      if (!provider || !provider.enabled) {
+        logger.warn({ id: providerId }, 'OIDC provider not found or disabled — skipping strategy registration')
+        return
+      }
+      const strategyId = OIDCModuleManager.strategyIdForProviderId(provider.id)
+      OIDCModuleManager._register(strategyId, OIDCModuleManager.buildStrategyOptions(provider))
+      if (strategyId !== 'openidconnect') {
+        OIDCModuleManager._register('openidconnect', OIDCModuleManager.buildStrategyOptions(first))
+      }
+    } else {
+      OIDCModuleManager._register('openidconnect', OIDCModuleManager.buildStrategyOptions(null))
+    }
+  },
+
+  _register(strategyId, options) {
+    try {
+      // (re)register: admin edits/cert rotation apply without restart.
+      if (passport._strategies && passport._strategies[strategyId]) {
+        passport.unuse?.(strategyId)
+      }
+      passport.use(strategyId, new OIDCStrategy(
+        options,
+        OIDCAuthenticationController.doPassportLogin
+      ))
+      OIDCModuleManager._registered.set(strategyId, true)
+    } catch (error) {
+      logger.error({ error, strategyId }, 'Failed to register OIDC strategy')
+    }
+  },
+
+  /** Evict a provider strategy (admin delete). Recon N5: passport.unuse is a plain map delete. */
+  evictStrategy(providerId) {
+    try {
+      const strategyId = OIDCModuleManager.strategyIdForProviderId(providerId)
+      passport.unuse?.(strategyId)
+      OIDCModuleManager._registered.delete(strategyId)
+    } catch (e) {
+      logger.warn({ e, strategyId: providerId }, 'Failed to evict OIDC strategy')
+    }
+  },
+
+  /**
+   * Module hook (contract preserved). Registration is lazy (ensureStrategy on the
+   * next login) so admin saves need no restart; hook kept for module contract.
+   */
+  passportSetup(passport, callback) {
+    OIDCModuleManager.ensureStrategy().then(() => callback(null), error => callback(error))
+    return undefined
+  },
+
   initPolicy() {
     try {
       PermissionsManager.registerCapability('change-password', { default : true })

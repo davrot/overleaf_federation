@@ -68,6 +68,7 @@ export async function getLDAPConfig() {
 
 /**
  * Get the first enabled SAML provider config from DB
+ * (kept for env-fallback single-provider mode; N-aware code uses getProviderById)
  */
 export async function getSAMLProviderConfig() {
   const config = await loadSSOConfig()
@@ -80,6 +81,7 @@ export async function getSAMLProviderConfig() {
 
 /**
  * Get the first enabled OIDC provider config from DB
+ * (kept for env-fallback single-provider mode; N-aware code uses getProviderById)
  */
 export async function getOIDCProviderConfig() {
   const config = await loadSSOConfig()
@@ -88,6 +90,32 @@ export async function getOIDCProviderConfig() {
     return provider || null
   }
   return null
+}
+
+/**
+ * Look up an SSO provider by its unique id (DB providers: ssoConfigs.providers[].id;
+ * env-fallback providers: synthetic ids 'saml' / 'oidc'). N-provider dispatch uses this.
+ */
+export async function getProviderById(id, { envFallback = true } = {}) {
+  if (id === 'saml' || id === 'oidc') {
+    // env-fallback synthetic provider refs
+    if (!envFallback) return null
+    return { __envFallback: true, id, type: id }
+  }
+  const config = await loadSSOConfig()
+  return config?.providers?.find(p => p.id === id) || null
+}
+
+/**
+ * True when an ssoConfigs DB doc is the active config (loaded into the process
+ * cache). After clearConfigCache the cache is empty until the next
+ * loadSSOConfig() re-populates it, so consumers that need post-save state must
+ * await loadSSOConfig() first (module boot / login / admin middleware all do).
+ * In env mode there is exactly one synthetic provider per protocol; strategies
+ * use the stock names to stay byte-identical with pre-N behaviour.
+ */
+export function isDbMode() {
+  return _cachedConfig !== null
 }
 
 /**
@@ -100,11 +128,13 @@ export async function getEnabledProviders() {
       .filter(p => p.enabled)
       .sort((a, b) => (a.order || 0) - (b.order || 0))
   }
-  // Fall back to env-based providers
+  // Fall back to env-based providers (single synthetic provider per protocol)
   const providers = []
   if (process.env.EXTERNAL_AUTH?.includes('saml')) {
     providers.push({
+      id: 'saml',
       type: 'saml',
+      enabled: true,
       buttonLabel: process.env.OVERLEAF_SAML_IDENTITY_SERVICE_NAME || 'Log in with SAML',
       loginUrl: '/saml/login',
       order: 0,
@@ -112,7 +142,9 @@ export async function getEnabledProviders() {
   }
   if (process.env.EXTERNAL_AUTH?.includes('oidc')) {
     providers.push({
+      id: 'oidc',
       type: 'oidc',
+      enabled: true,
       buttonLabel: process.env.OVERLEAF_OIDC_IDENTITY_SERVICE_NAME || 'Log in with OIDC',
       loginUrl: '/oidc/login',
       order: 1,

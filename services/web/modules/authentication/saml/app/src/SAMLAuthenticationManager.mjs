@@ -4,9 +4,36 @@ import UserCreator from '../../../../../app/src/Features/User/UserCreator.mjs'
 import { ParallelLoginError } from '../../../../../app/src/Features/Authentication/AuthenticationErrors.mjs'
 import SAMLIdentityManager from '../../../../../app/src/Features/User/SAMLIdentityManager.mjs'
 import { User } from '../../../../../app/src/models/User.mjs'
+import { getProviderById } from '../../../ssoConfigLoader.mjs'
 
 const SAMLAuthenticationManager = {
-  async findOrCreateUser(profile, auditLog) {
+  /**
+   * Per-provider SAML user resolution (N-provider, P1b).
+   *
+   *  - samlProviderId: identifier key for `samlIdentifiers` and the
+   *    SAMLIdentityManager lookup. Env mode → '1' (legacy stock contract);
+   *    DB mode → the ssoConfigs provider row id.
+   *  - attribute fields: live per-provider config in DB mode (admin edits
+   *    apply without restart); env mode falls back to Settings.saml singleton.
+   *
+   * @param {object} profile  per-provider parsed attribute map
+   * @param {object} auditLog
+   * @param {object} opts.providerId  provider row id (DB) or env legacy id '1'
+   */
+  async findOrCreateUser(profile, auditLog, { providerId } = {}) {
+    const provider = await getProviderById(providerId)
+    const isDbProvider = !!(provider && !provider.__envFallback)
+    const samlProviderId = isDbProvider ? providerId : '1'
+    const dbCfg = isDbProvider ? {
+      attUserId:    provider.userIdField || 'eduPersonPrincipalName',
+      attEmail:     provider.emailField || 'email',
+      attFirstName: provider.firstNameField || 'givenName',
+      attLastName:  provider.lastNameField || 'displayName',
+      attAdmin:     provider.isAdminField || 'isSamlAdmin',
+      valAdmin:     provider.isAdminFieldValue || '1',
+      updateUserDetailsOnLogin: !!provider.updateUserDetailsOnLogin,
+    } : null
+    const cfg = dbCfg || Settings.saml?.providers?.[samlProviderId] || Settings.saml
     const {
       attUserId,
       attEmail,
@@ -15,7 +42,7 @@ const SAMLAuthenticationManager = {
       attAdmin,
       valAdmin,
       updateUserDetailsOnLogin,
-    } = Settings.saml
+    } = cfg
     const externalUserId = profile[attUserId]
     const email = Array.isArray(profile[attEmail])
                     ? profile[attEmail][0].toLowerCase()
@@ -27,12 +54,11 @@ const SAMLAuthenticationManager = {
       isAdmin = (Array.isArray(profile[attAdmin]) ? profile[attAdmin].includes(valAdmin) :
                                                     profile[attAdmin] === valAdmin)
     }
-    const providerId = '1' // for now, only one fixed IdP is supported
 // We search for a SAML user, and if none is found, we search for a user with the given email. If a user is found,
 // we update the user to be a SAML user, otherwise, we create a new SAML user with the given email. In the case of
 // multiple SAML IdPs, one would have to do something similar, or possibly report an error like
 // 'the email is associated with the wrong IdP'
-    let user = await SAMLIdentityManager.getUser(providerId, externalUserId, attUserId)
+    let user = await SAMLIdentityManager.getUser(samlProviderId, externalUserId, attUserId)
     if (!user) {
       user = await User.findOne({ 'email': email }).exec()
       if (!user) {
@@ -43,7 +69,7 @@ const SAMLAuthenticationManager = {
             last_name: lastName,
             isAdmin: isAdmin,
             holdingAccount: false,
-            samlIdentifiers: [{ providerId: providerId }],
+            samlIdentifiers: [{ providerId: samlProviderId }],
             analyticsId: crypto.randomUUID(),
           }
         )
@@ -54,14 +80,15 @@ const SAMLAuthenticationManager = {
         {
           $set : {
            'emails.0.confirmedAt': Date.now(), //email of saml user is confirmed
-           'emails.0.samlProviderId': providerId,
-           'samlIdentifiers.0.providerId': providerId,
+           'emails.0.samlProviderId': samlProviderId,
+           'samlIdentifiers.0.providerId': samlProviderId,
            'samlIdentifiers.0.externalUserId': externalUserId,
            'samlIdentifiers.0.userIdAttribute': attUserId,
           },
         }
       ).exec()
     }
+// We only want to update the user if the user is a SAML user
     let userDetails = updateUserDetailsOnLogin ? { first_name : firstName, last_name: lastName } : {}
     if (attAdmin && valAdmin) {
       user.isAdmin = isAdmin
