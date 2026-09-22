@@ -21,6 +21,7 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 | P1 | S2S (pairwise depth-1 verify) + invite + A-side grant round-trip (RP) + admin pin stub | **DONE** (s2s/ + rp/ + admin/ committed 2026-09-18b) |
 | P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit + institutional TA (P3 pin-time) | **DONE** (rate-limit, audit, admin, claim allow-list via `Redact.CLAIM_LOG_ALLOWLIST`, institutional TA pin-time all shipped + committed) |
 | P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
+| P2-live | Live smoke against real Mongo+Redis+oidc-provider+express (the module, not the mocks) | **DONE** (13 scenarios ALL PASS — see SESSION 10; `tools/live-smoke.mjs`) |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -254,6 +255,18 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 
 ## 9. Progress Log
 
+### [SESSION 10] 2026-09-22 — Live smoke (goal 1ec14289) CLOSED: module proven live, 2 prod bugs caught
+- **`tools/live-smoke.mjs`** (NEW, committed): the two-instance scenario matrix 1:1, but the stub layer is the REAL runtime — real Mongo (all 5 models: FederationKey/Peer, User, ProjectInvite, ProjectAuditLogEntry), real Redis (PKCE state, jti dedup, JWKS cache, rate limits + oidc-provider RedisOidcProviderAdapter Session/Interaction/AuthorizationCode/Grant docs + client SET), real express listen, real oidc-provider v9 dance, real jose. Stubs: ONLY the 4 documented app seams (CollaboratorsGetter ×2, CollaboratorsHandler ×1, UserSessionsManager ×1). Single origin `beta.example` plays both A (RP) and B (OP) one process; `globalThis.fetch` rewrite `https://beta.example` → local port.
+- **13 scenarios ALL PASS (exit 0)**: 01 OIDC dance happy path (authorize→login→consent→code→callback→mirror+grant+audit), 02 PKCE one-shot replay refused, 03/04 S2S invited (approved / soft-deny), 05/06 S2S authorize-invite (approved+audit / invitee-unknown+audit), 07 jti replay, 08 bad-signature, 09 unknown-kid, 10 rate-limit 429+Allow-Retry-After, 11a revoke+killOutstandingCodes sweep (codes die, B sessions/survive), 11b revoke trust+audit, 12 federation-off.
+- **Two PRODUCTION bugs caught by the live run that the entire unit suite (incl. two-instance) could never reach** — both fixed + committed:
+  1. `oidc/RedisOidcProviderAdapter.mjs` lazy `import('../../../../app/src/infrastructure/RedisWrapper.mjs')` — 4-up from `modules/federation/oidc/` lands in `services/app/...` (NO SUCH FILE). vitest masks this (vi.mock intercepts resolution); real Node ESM does not → oidc-provider 500 `server_error` on the first `/auth`. Fix: 3-up. (Both call sites: `createAdapter` + `revokeClientCodes`.)
+  2. `oidc/bridge.mjs` `CONSENT_VIEW = path.resolve(__dirname, '../../app/views/consent.pug')` → `modules/app/views/` (missing). The view lives at `modules/federation/app/views/`. Fix: 1-up. (Live run got here only after fix 1 — the dance reached consent render.)
+- **Flake fixed (proven live)**: two-instance test #8 (bad-signature) flipped the LAST char of the ES256 signature segment. A last-char flip can decode to an IDENTICAL signature (base64url padding bits) → verification legitimately passes → flaky 200. Live-smoke 08 hit exactly this (first flip produced a passing JWS). Both now flip a MIDDLE char (deterministic). Live evidence: flip-at-end JWS verified OK against its own key.
+- **Run** (from `services/web/`; containers `fed-smoke-mongo` 27107 + `fed-smoke-redis` 6380):
+  `timeout 240 node modules/federation/tools/live-smoke.mjs` (env defaults baked in; CWD must be `services/web/` for @overleaf/settings).
+- **Cleanup**: stray `services/web/live-smoke-standalone.mjs` + `.probe_{bare,live,settings2}.mjs` deleted. Unit suite 137/137 green (12 files) after all edits.
+- **Anti-loop honored**: recon stayed closed for the existing wire code; all failures resolved via test output + targeted source reads. Iteration budget used: adapter import (1), bridge view path (1), flip-determinism (1).
+
 ### [SESSION 4] 2026-09-18 — P0–P2 module COMPLETED (committed batch of 2026-09-18b)
 - **All module code written and committed**: `s2s/` (S2sRouter + 3 actions), `rp/` (State HMAC + PKCE, CodeExchange fetch+jose, CallbackRouter), `invite/` (controller+router), `admin/` (controller+router), `index.mjs` (WebModule wiring), `app/views/consent.pug`, `util/RateLimitStore.mjs`.
 - **Bug fixes** (allowed: oidc/ + test-caught): `createProvider.mjs` missing `await` on `buildOidcProviderClients()`; `leaf.mjs` `oidcEndpoints()` authorization `/authorize`→`/auth` (the endpoint oidc-provider v9 actually mounts) and callback → `/federation/oidc/rp/callback` (the route CallbackRouter mounts);
@@ -342,7 +355,7 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 | TODO-a9c6dd79 | two-instance integration test (OIDC code dance + S2S round-trip) | **CLOSED** (12/12 green; SESSION 8) |
 | TODO-840029f1 | delete probe files; reconcile `requireAdminApproval` default | open (probe cleanup = `probe*.mjs` + `oidc_v9probe*.mjs` untracked in `services/web/`; `requireAdminApproval` default stays `true` per plan 04 §3 — see SESSION 6) |
 | TODO-eef3de7d | run migrations against real Mongo (docker) | open |
-| TODO-1ec14289 | two-instance live smoke (docker / smoke script) | open |
+| TODO-1ec14289 | two-instance live smoke (docker / smoke script) | **CLOSED** (SESSION 10: `tools/live-smoke.mjs` 13/13 ALL PASS against real Mongo+Redis+express+oidc-provider) |
 | TODO-e652c0d9 | settings knobs for timeouts + `killOutstandingCodes` sweep | open |
 | TODO-45cb2ea7 | frontend: invite preview hook + admin UI | open |
 | TODO-47f7a583 | `allowFederatedProjectCreate` (04 §3) | open |

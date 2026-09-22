@@ -44,7 +44,7 @@ import SessionManager from '../../../app/src/Features/Authentication/SessionMana
 import { getOidcProvider } from './createProvider.mjs'
 
 const __dirname = new URL('.', import.meta.url).pathname
-const CONSENT_VIEW = path.resolve(__dirname, '../../app/views/consent.pug')
+const CONSENT_VIEW = path.resolve(__dirname, '../app/views/consent.pug')
 
 /**
  * Mount the bridge on the given express router.

@@ -59,7 +59,7 @@ const GRANTABLE = new Set([
 export default function createAdapter(redisClient) {
   const getClient = redisClient != null
     ? async () => redisClient
-    : () => import('../../../../app/src/infrastructure/RedisWrapper.mjs')
+    : () => import('../../../app/src/infrastructure/RedisWrapper.mjs')
       .then(({ default: RedisWrapper }) => RedisWrapper.client('federation'))
   return (modelName) => createAdapterInstance(modelName, getClient)
 }
@@ -98,7 +98,7 @@ export default function createAdapter(redisClient) {
 export async function revokeClientCodes(clientId, redisClient) {
   const getClient = redisClient != null
     ? async () => redisClient
-    : () => import('../../../../app/src/infrastructure/RedisWrapper.mjs')
+    : () => import('../../../app/src/infrastructure/RedisWrapper.mjs')
       .then(({ default: RedisWrapper }) => RedisWrapper.client('federation'))
   const r = await getClient()
   const setKey = `federation:oidc:client:${clientId}`

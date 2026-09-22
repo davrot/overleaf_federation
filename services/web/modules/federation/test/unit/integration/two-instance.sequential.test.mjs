@@ -750,15 +750,17 @@ test('S2S bad signature → 401 bad-signature', async () => {
   const built = await buildS2sRequest('beta.example', 'invited', {
     invitee: { origin: 'beta.example', localName: 'alice@beta.example' },
   })
-  // Tamper the JWT signature segment. A 64-byte ES256 signature ends in
-  // '='/'=' padding, so the LAST base64 char holds only the low 2 bits
-  // of the second-to-last byte (values 0-3, chars A-D); a naive swap
-  // there can decode to identical bits (e.g. 'B'->'x'). Flip A<->B
-  // instead: bit 0 of the low byte always flips, so the signature
-  // changes with probability 1.
+  // Tamper the JWT signature segment. The LAST base64url char of a 64-byte
+  // ES256 signature encodes only the low bits of the final byte, so a
+  // flip there can decode to the IDENTICAL signature (verified live: the
+  // flipped JWS still passed ES256 verification). Flip a MIDDLE char —
+  // always changes decoded bits, so verification deterministically fails.
   const a = built.headers.client_assertion
-  const last = a.slice(-1)
-  const bad = a.slice(0, -1) + (last === 'A' ? 'B' : last === 'D' ? 'C' : 'A')
+  const parts = a.split('.')
+  const sig = parts[2]
+  const mid = Math.floor(sig.length / 2)
+  const flipped = sig[mid] === 'A' ? 'B' : 'A'
+  const bad = `${parts[0]}.${parts[1]}.${sig.slice(0, mid)}${flipped}${sig.slice(mid + 1)}`
   const res = await postS2s({ ...built, headers: { ...built.headers, client_assertion: bad } })
   expect(res.status).toBe(401)
   const data = await res.json()
