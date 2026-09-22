@@ -1215,6 +1215,7 @@ module.exports = {
     'authentication/ldap',
     'authentication/saml',
     'authentication/oidc',
+    'authentication/admin', // SSO config admin (DB ssoConfigs; env fallback)
     'federation', // federated identity (P0–P2); import before admin-tools
     'admin-tools', // import after authentication
     'registration-page', // import after authentication

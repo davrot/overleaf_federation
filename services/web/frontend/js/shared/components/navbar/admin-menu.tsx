@@ -68,6 +68,9 @@ export default function AdminMenu({
           View Script Logs
         </NavDropdownLinkItem>
       ) : null}
+      {canDisplayAdminMenu ? (
+        <NavDropdownLinkItem href="/admin/sso">SSO Configuration</NavDropdownLinkItem>
+      ) : null}
     </NavDropdownMenu>
   )
 }
