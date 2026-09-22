@@ -44,7 +44,6 @@ const SAMLModuleManager = {
           updateUserDetailsOnLogin: !!p.updateUserDetailsOnLogin,
         }])),
       }
-      Settings._samlDbProvider = firstProvider // first-provider seam (SP-meta / logout fallback)
     } else {
       Settings.saml = {
         enable: true,

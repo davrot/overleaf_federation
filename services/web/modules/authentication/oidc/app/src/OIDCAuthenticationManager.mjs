@@ -4,7 +4,7 @@ import UserCreator from '../../../../../app/src/Features/User/UserCreator.mjs'
 import ThirdPartyIdentityManager from '../../../../../app/src/Features/User/ThirdPartyIdentityManager.mjs'
 import { ParallelLoginError } from '../../../../../app/src/Features/Authentication/AuthenticationErrors.mjs'
 import { User } from '../../../../../app/src/models/User.mjs'
-import { getProviderById, isDbMode } from '../../../ssoConfigLoader.mjs'
+import { getProviderById } from '../../../ssoConfigLoader.mjs'
 
 const OIDCAuthenticationManager = {
   /**
@@ -13,7 +13,7 @@ const OIDCAuthenticationManager = {
    * @param {object} opts.providerId  provider row id (DB) or env synthetic id
    */
   async findOrCreateUser(profile, auditLog, { providerId } = {}) {
-    const provider = isDbMode() ? await getProviderById(providerId) : null
+    const provider = await getProviderById(providerId)
     const envCfg = Settings.oidc
     const isDbProvider = provider && !provider.__envFallback
     const cfg = isDbProvider ? {
@@ -113,8 +113,8 @@ const OIDCAuthenticationManager = {
   },
   async linkAccount(userId, profile, auditLog, { providerId } = {}) {
     const envCfg = Settings.oidc
-    const provider = isDbMode() ? await getProviderById(providerId) : null
-    const isDbProvider = !!provider
+    const provider = await getProviderById(providerId)
+    const isDbProvider = !!provider && !provider.__envFallback
     const attUserId = isDbProvider ? (provider.userIdField || 'id') : envCfg.attUserId
     const linkProviderId = isDbProvider
       ? (provider.providerID || providerId)

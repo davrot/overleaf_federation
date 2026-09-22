@@ -43,7 +43,9 @@ const OIDCModuleManager = {
             : null,
         }])),
       }
-      // keep the single-provider seam for existing readers (logout URL etc.)
+      // Single-provider seam for existing readers (logout URL). Note: only the
+      // first-enabled provider's logoutURL is honoured (post-doLogout the session
+      // providerId is gone; per-provider logout is a Phase 2 follow-up).
       Settings._oidcDbProvider = firstProvider
       // keep oauthProviders entry for the first provider (link UI / descriptions)
       const providerId = first.providerID || first.id

@@ -8,7 +8,7 @@ import UserController from '../../../../../app/src/Features/User/UserController.
 import { handleAuthenticateErrors } from '../../../../../app/src/Features/Authentication/AuthenticationErrors.mjs'
 import { xmlResponse } from '../../../../../app/src/infrastructure/Response.mjs'
 import { readFilesContentFromEnv } from '../../../utils.mjs'
-import { isDbMode } from '../../../ssoConfigLoader.mjs'
+import { getProviderById } from '../../../ssoConfigLoader.mjs'
 
 const SAMLAuthenticationController = {
   /**
@@ -162,7 +162,10 @@ const SAMLAuthenticationController = {
       await SAMLModuleManager.ensureStrategy(providerId)
       const strategyId = SAMLModuleManager.strategyIdForProviderId(providerId)
       const samlStratery = passport._strategy(strategyId)
-      const dbProvider = isDbMode() ? Settings._samlDbProvider : null
+      // Cert overrides: DB row for the first-enabled provider (env-mode -> env vars fallback).
+      // The provider is resolved from id; the env synthetic id yields a marker (no DB row).
+      const provider = await getProviderById(providerId)
+      const dbProvider = provider && !provider.__envFallback ? provider : null
       const decryptionCert = dbProvider?.decryptionCert
         ? readFilesContentFromEnv(dbProvider.decryptionCert)
         : readFilesContentFromEnv(process.env.OVERLEAF_SAML_DECRYPTION_CERT)
