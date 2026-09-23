@@ -256,14 +256,44 @@ B-side 401s are the gate). Documented.)
   { projectId, expiresAt })` — 2a contract `{ git_url, pat, expires_at }`.
   Tests: 9 new (`FederatedExportController.test.mjs`, thunk pattern +
   redaction regression) / 172/172 federation green.
-- **2c (git-bridge guard + sweep, merges on 2a)** — read-only 403 guard
-  (receive-pack scope check) + `killOutstandingCodes`-driven sweep in
-  both revoke paths (admin + S2S — reuse the SESSION 9 reset
-  placement) + `export.maxExportTtlSeconds` settings knob + redaction
-  of `pat` in the **response** path audit.
-  Tests: git-bridge receive-pack 403 unit + revoke sweep (reuses the
-  SESSION 9 revoke harness, 4 cases: sweep active, sweep disabled
-  (setting off), idempotent no-sweep, code sweep).
+- **2c (git-bridge guard + sweep, merges on 2a) — SHIPPED** (SESSION 14) —
+  read-only **403 guard at the git-bridge write choke point**
+  (`GitBridgeAuthMiddleware.ensureTokenProjectAccess('write')`):
+  the token is resolved WITH its scope via the new
+  `GitBridgePATManager.getUserIdAndScope` (`{ userId, scope }`;
+  `getUserId` now delegates to it). A `federation:`-prefixed scope
+  (marker `federation:git_bridge`, minted by B) is refused on the
+  write path (receive-pack snapshot postback) **before** the
+  permission oracle, `logger.warn` + 403; read paths (fetch /
+  upload-pack) stay allowed (the content path). No federation import
+  (dependency rule: scope-string prefix only).
+  Sweep + revoke wiring: `export/Sweep.mjs` `sweepExportGrants(origin)`
+  — ledger rows → `status:'revoked'` + per-row
+  `db.oauthAccessTokens.deleteOne({_id, scope: EXPORT_SCOPE})`
+  (scope-guarded, best-effort) + `federation_export_swept` audit
+  (meta `{ origin, scope }`, PAT value never a field). Gates on
+  `Settings.federation.export.sweepOnRevoke` (default ON; off = v1
+  NO-OP). Independent of the `killOutstandingCodes` flag (that gates
+  `revokeClientCodes`, the oidc code sweep, 06 §179). Called from BOTH
+  revoke transitions (s2s `revoke.mjs` + admin `handleRevoke`, both
+  try/catch best-effort mirroring the code-sweep twin).
+  Tests: `git-bridge/test/unit/GitBridgeAuthMiddleware.test.mjs` (6
+  cases: write+federation:scope→403 oracle NOT consulted,
+  read+federation:scope→allowed fetch, write+normal→oracle applied,
+  write+normal+no-access→403 via oracle, write+unknown→401,
+  read+unknown→401; thunk `__TOKENS`/`__READ_ALLOWED`/
+  `__WRITE_ALLOWED` + call-log) + `s2s/revoke.test.mjs` (4 cases: sweep
+  on transition (2 PATs scope-guarded, ledger revoked, redacted
+  audit), sweep off (NO-OP), idempotent no-sweep (0 modified),
+  best-effort PAT-delete failure still revokes) + `admin
+  /FederationAdminController.test.mjs` (2 cases: sweep on transition
+  flag-INDEPENDENT + idempotent double-revoke). 183/183 (177 fed + 6
+  git-bridge) green. Lint clean on all touchable 2c files.
+- **OPEN for 2d:** 2-real-origins (A≠B) live docker smoke — export
+  wizard → S2S export-project → PAT fetch + **live push-gets-403**
+  against the deployed git-bridge (the guard is in this repo's
+  Node REST surface; 2d verifies both the Bearer and Basic-info
+  surfaces end-to-end).
 - **RESOLVED in 2a (was open question):** git PAT expiry —
   git-bridge **DOES enforce `expiresAt`** on PATs: `GitBridgePATManager.getUserId`
   filters `expiresAt: { $gt: now }` when looking up a raw PAT

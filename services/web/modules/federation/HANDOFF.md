@@ -22,7 +22,7 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 | P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit + institutional TA (P3 pin-time) | **DONE** (rate-limit, audit, admin, claim allow-list via `Redact.CLAIM_LOG_ALLOWLIST`, institutional TA pin-time all shipped + committed) |
 | P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
 | P2-live | Live smoke against real Mongo+Redis+oidc-provider+express (the module, not the mocks) | **DONE** (13 scenarios ALL PASS — see SESSION 10; `tools/live-smoke.mjs`) |
-| **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **IN PROGRESS** (**2a SHIPPED** — see SESSION 12; 2b/2c queued) |
+| **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **IN PROGRESS** (**2a SHIPPED** — SESSION 12; **2b SHIPPED** — SESSION 13; **2c SHIPPED** — SESSION 14; 2d next) |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -1252,3 +1252,62 @@ existing `oauthAccessTokens` collection — VERIFY name first).
 - Next: **2c** (`git_receive_pack` 403 guard + `killOutstandingCodes`-
   driven export sweep; recon seam: 2a lock item (b) above — no new
   adapter method, no new migration).
+# SESSION 14 (2026-09-24): 2c SHIPPED (Goal `3ea7bb53`, step 2c of 4)
+
+- Commits (pushed to `origin/test_federation`):
+  - `code + tests` (7 code + 3 test files, 1 new `export/Sweep.mjs`,
+    `export`-scope 403 guard at `GitBridgeAuthMiddleware`
+    `ensureTokenProjectAccess('write')`, `sweepExportGrants` in both
+    `revoke.mjs` + `handleRevoke` (both try/catch best-effort),
+    `sweepOnRevoke` settings default)
+  - `docs` (this HANDOFF SESSION 14 row + plan 09 §6 2c SHIPPED)
+- **403 guard (plan 09 §4, 2c)**: at the git-bridge REST write choke
+  (`GitBridgeAuthMiddleware.ensureTokenProjectAccess('write')`):
+  resolve token WITH scope via new
+  `GitBridgePATManager.getUserIdAndScope(token) → { userId, scope }`
+  (`getUserId` now delegates to this — no new DB path). Write path:
+  if `identity.scope.startsWith('federation:')` → `logger.warn`
+  + 403 **before** the permission oracle (project write-allow would
+  NOT save an export PAT). Read path: unchanged (fetch = the content
+  path for a federation-EXPORT token). No federation import (the
+  dependency rule: marker is the scope string `federation:git_bridge`).
+- **Sweep (plan 09 §3.3)**: `export/Sweep.mjs` `sweepExportGrants(origin)`
+  — ledger rows `federationExportGrants` for `homeOrigin == origin` →
+  `status:'revoked'`, their `patId`s `db.oauthAccessTokens.deleteOne`
+  (scope-guarded `scope: 'federation:git_bridge'`, NOT user
+  `git_bridge`; per-row best-effort), `federation_export_swept` audit
+  (meta `{ origin, scope }` redacted — PAT value never a field).
+  Gates on `Settings.federation.export.sweepOnRevoke` (default
+  `true` in `settings.defaults.js`; off = v1 NO-OP). Independent of
+  the peer `killOutstandingCodes` flag (that gates `revokeClientCodes`
+  — the oidc code sweep, 06 §179). Called from BOTH revoke
+  transitions (s2s `revoke.mjs` + admin `handleRevoke`, both
+  try/catch mirroring the code-sweep twin).
+- **Tests (6 + 4 + 2 = 12 new, 183/183 green)**:
+  - `git-bridge/test/unit/GitBridgeAuthMiddleware.test.mjs` (NEW,
+    6 cases): write+federation:-scope → 403 oracle NOT consulted;
+    read+federation:-scope → allowed fetch; write+normal-scope →
+    oracle applied + `req.user_id` set; write+normal-scope+no-access
+    → 403 via oracle; write+unknown token → 401; read+unknown →
+    401. Thunk globals `__TOKENS`/`__READ_ALLOWED`/
+    `__WRITE_ALLOWED` + call-logs `__READ_CALLS`/`__WRITE_CALLS`
+    (thunk pattern, NOT `vi.fn` — bootstrap runs
+    `vi.resetAllMocks()` after every test).
+  - `s2s/revoke.test.mjs` (4 new): sweep on transition (2 PATs
+    scope-guarded, ledger `status:'revoked'`, redacted
+    `federation_export_swept` audit meta); sweep off
+    (`sweepOnRevoke: false` → NO-OP); idempotent double-revoke
+    → no second sweep (0 modified); best-effort PAT-delete failure
+    still revokes (06 §174 not-over-cross).
+  - `admin/FederationAdminController.test.mjs` (2 new): export
+    sweep runs on transition (flag-INDEPENDENT, `beta.example` arg);
+    idempotent double-revoke → no second sweep.
+- **Lint**: clean on all 2c-touchable 9 files.
+- **OPEN for 2d (Goal `3ea7bb53` step 4 of 4)**: two-real-origins
+  (A≠B) live docker smoke — export wizard + S2S export-project +
+  PAT live-fetch + **push-gets-403** against the deployed git-bridge.
+  The 2c guard is in this repo's Node REST surface
+  (`GitBridgeAuthMiddleware`); 2d verifies end-to-end the Bearer
+  surface (clone `https://git:<PAT>@host/path`) AND the curl-Bearer
+  fallback (wizard documents both).
+- Next: **2d** (live two-real-origins smoke).
