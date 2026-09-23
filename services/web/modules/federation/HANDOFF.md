@@ -1196,3 +1196,59 @@ existing `oauthAccessTokens` collection — VERIFY name first).
   re-add it; 2b asserts it's redacted (regression test).
 - 2c sweep reuses `killOutstandingCodes` (already exported from the adapter).
   NO new adapter method.
+
+# SESSION 13 (2026-09-23): 2b SHIPPED (Goal `3ea7bb53`, step 2b of 4)
+
+- Commit: `1b7a9d4634` "content-bridge 2b: A-side federated export wizard
+  (plan 09 §4.1)" — 7 files (4 new, 3 modified), pushed to
+  `origin/test_federation`.
+- Scope (LOCKED Q1/Q2 decisions, SESSION 11):
+  - **A is the thin proxy** — `invite/FederatedExportController.mjs` +
+    `invite/FederatedExportRouter.mjs`: `GET /federation/export` (form:
+    approved outbound|both peer dropdown + B-side project id + optional
+    TTL seconds) and `POST /federation/export` (re-sign the client
+    assertion → `callPeer(origin, 'export-project', { projectId,
+    expiresAt })` → result view). Both on the CSRF-applied `router`
+    under `requireLogin()` (invite shape, HANDOFF decision 10). Mounted
+    in `index.mjs` `router.apply` after the invite router (④b) under
+    the existing `Settings.federation.enabled` gate.
+  - **B is the authority** (09 §2.1) — the wizard does NOT re-check
+    consent locally; B's S2S handler re-clamps TTL and binds the
+    owner→consent grant. Business refusal (200 `{ok:false, code}` →
+    403 form re-render + `federation_export_denied` audit with the
+    redacted reason); wire refusal (401 / 429 / 3xx `callPeer` throw →
+    502 + denied audit). A persists NOTHING (re-run = fresh S2S; B's
+    ledger upsert is idempotent, 09 §1).
+  - **PAT** (Q2): rendered into the `federation-export-result` Pug view
+    only (auto-escaped; `<input readonly>` clone-command pre-filled as
+    `git clone https://git:<PAT>@host/path` — git-bridge's PAT-as-userinfo
+    flow, git-modal.tsx convention; curl Bearer form documented as the
+    fallback, 2d live-smoke covers both surfaces). NOT a JSON body
+    field, NEVER in audit meta (regression test asserts PAT absent from
+    every audit `JSON.stringify` call).
+  - Audit: `AUDIT_TYPES.exportRequested` = `federation_export_requested`
+    (meta `{ origin, scope }` on success + `{ gitUrl, expiresAt }` per
+    09 §3.2 — non-secret facts). `Audit.mjs` `META_FIELDS` extended with
+    `gitUrl` + `expiresAt` (04 §8 allow-list, both redacted-safe).
+  - Views: `app/views/federation-export.pug` (form + `_csrf` hidden
+    field) + `federation-export-result.pug`; both Pug-compile-verified
+    in-session (the `export` reserved-word pitfall: the Pug local is
+    named `export` only in the controller, views use `defaultTtlSeconds`
+    / `maxTtlSeconds` top-level locals — Pug cannot resolve
+    `export.maxTtlSeconds` because `export` is a reserved JS identifier
+    inside attribute expressions; lesson: keep view locals unreserved).
+- Tests: 172/172 federation module (`test/unit/invite/FederatedExportController.test.mjs`
+  9 new — thunk pattern on `callPeer`/`FederationPeer.find`/`audit`,
+  redaction regression, TTL clamp 3600-default / 86400-max / malformed →
+  default, peer-gate 403 no-wire, projectId 400, wire-502 + denied audit,
+  business-403 + denied audit). Lint clean on all 7 files.
+- **OPEN for 2d**: the exact git-bridge token-authentication surface
+  (Bearer header vs Basic userinfo) is implementation-dependent on the
+  deployed git-bridge Go service (this repo's `git-bridge` module only
+  serves the REST + PAT management; the Go `git-bridge` repo is not in
+  this workspace). The wizard documents BOTH forms (clone with
+  embedded PAT userinfo + curl Bearer fallback); 2d must verify which
+  the live deployment accepts (clone vs curl).
+- Next: **2c** (`git_receive_pack` 403 guard + `killOutstandingCodes`-
+  driven export sweep; recon seam: 2a lock item (b) above — no new
+  adapter method, no new migration).

@@ -245,12 +245,17 @@ B-side 401s are the gate). Documented.)
   `tools/migrations/lib/mongodb.mjs` static map (`federationExportGrants`)
   — verified live against smoke Mongo (indexes `owner_status_1`,
   `expires_at_1` present; migration row recorded).
-- **2b (A-side wizard, merges on 2a)** — `FederatedExportController` +
-  session-only view + B-side response contract (client-side: the
-  session-only `ClientAssertionClient` fetch — A's own fetch, NOT the
-  module's S2sRouter).
-  Tests: controller unit (mock fetch/ClientAssertionClient + fake
-  session) + redaction regression (pat not in audit log).
+- **2b (A-side wizard, merges on 2a) — SHIPPED** (SESSION 13, commit
+  `1b7a9d4634`) — `invite/FederatedExportController` +
+  `FederatedExportRouter` on the CSRF `router` under `requireLogin`
+  (invite shape), `app/views/federation-export[-result].pug` (form +
+  one-time PAT render, Q2), `federation_export_requested` audit +
+  `META_FIELDS += { gitUrl, expiresAt }` (09 §3.2, PAT never audited),
+  mounted ④b in `index.mjs` `router.apply`. A persists nothing
+  (re-run = fresh S2S). Wire: `callPeer(origin, 'export-project',
+  { projectId, expiresAt })` — 2a contract `{ git_url, pat, expires_at }`.
+  Tests: 9 new (`FederatedExportController.test.mjs`, thunk pattern +
+  redaction regression) / 172/172 federation green.
 - **2c (git-bridge guard + sweep, merges on 2a)** — read-only 403 guard
   (receive-pack scope check) + `killOutstandingCodes`-driven sweep in
   both revoke paths (admin + S2S — reuse the SESSION 9 reset
