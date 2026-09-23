@@ -226,15 +226,25 @@ B-side 401s are the gate). Documented.)
 
 ## 6. Phases
 
-- **2a (B-side, mergeable alone)** — `export-project` S2S +
+- **2a (B-side, mergeable alone) — SHIPPED** (SESSION content-bridge 2a) — `export-project` S2S +
   §2.1 adapter index (`findByAccountAndClient` + account-key write in
   `RedisOidcProviderAdapter.upsert` for Grant + `revokeByGrantId`
   cascade) + grant model + PAT mint + 3 new 401 codes + budget row +
   redaction + audit + B-side home `findExistingGrant` wired (bonus).
-  Tests: S2S action unit (mocks: peer/project model/adapter
-  grant-lookup — 12 test cases: no-consent, not-owned, disabled,
-  idempotent, budget, redaction, sweep) + adapter index unit (2 cases
-  with fake-redis) + two-instance S2S-only scenario (no git).
+  Tests (GREEN): S2S action unit (`exportProject.test.mjs`, 14 cases:
+  settings gate, malformed/no-project/owner-missing/mirror/suspended →
+  not-owned, no-consent, happy sha256+snake_case, idempotent fresh-PAT,
+  TTL clamp ×2, grant-gone soft-degrade, ledger-failure no-break) +
+  adapter account-index unit (`adapterAccountIndex.test.mjs`, 7 cases
+  with fake-redis: Grant index, token-model exclusion, live/unknown/
+  expired lookup, cascade destroy, not-over-cross) + two-instance S2S
+  scenario (`two-instance.sequential.test.mjs` cases 13–17: export-
+  disabled, dance→export happy sha256 ledger, idempotent re-export,
+  no-consent, 429 budget on the 11th).
+  Migration `20260721150001_add_federation_export_indexes` added to
+  `tools/migrations/lib/mongodb.mjs` static map (`federationExportGrants`)
+  — verified live against smoke Mongo (indexes `owner_status_1`,
+  `expires_at_1` present; migration row recorded).
 - **2b (A-side wizard, merges on 2a)** — `FederatedExportController` +
   session-only view + B-side response contract (client-side: the
   session-only `ClientAssertionClient` fetch — A's own fetch, NOT the
@@ -249,14 +259,17 @@ B-side 401s are the gate). Documented.)
   Tests: git-bridge receive-pack 403 unit + revoke sweep (reuses the
   SESSION 9 revoke harness, 4 cases: sweep active, sweep disabled
   (setting off), idempotent no-sweep, code sweep).
-- **Open question (resolve in 2a, non-blocking):** git PAT expiry —
-  PATs in `oauthAccessTokens` have a `expiresAt` enforced by
-  git-bridge auth today (04 §4 deny-list OK since the token is
-  instance-local + the §2 response is the one documented transport).
-  Verify the enforcement point during 2a; if git-bridge does NOT
-  enforce `expiresAt` on PATs (needs confirming), the `FederationExportGrant`
-  sweep (04 §5) is the expiry enforcement and the setting's cap is
-  documented.
+- **RESOLVED in 2a (was open question):** git PAT expiry —
+  git-bridge **DOES enforce `expiresAt`** on PATs: `GitBridgePATManager.getUserId`
+  filters `expiresAt: { $gt: now }` when looking up a raw PAT
+  (`GitBridgePATManager.mjs:98`). So the 2a TTL clamp
+  (request ∩ grant remaining ∩ `maxExportTtlSeconds`) is the live
+  expiry enforcement point; the §3 sweep is belt-and-suspenders.
+  The scope regex `gitBridge: /\bgit_bridge\b/` matches both
+  `git_bridge` (user PATs) and `federation:git_bridge` (2a export
+  PATs) because `:` is a non-word boundary — the 2c read-only guard
+  will need to distinguish by the `federation:` prefix (already the
+  plan's intent). No change needed.
 
 ## 7. What "backup" means here (honest)
 

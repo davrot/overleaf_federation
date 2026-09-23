@@ -22,6 +22,7 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 | P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit + institutional TA (P3 pin-time) | **DONE** (rate-limit, audit, admin, claim allow-list via `Redact.CLAIM_LOG_ALLOWLIST`, institutional TA pin-time all shipped + committed) |
 | P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
 | P2-live | Live smoke against real Mongo+Redis+oidc-provider+express (the module, not the mocks) | **DONE** (13 scenarios ALL PASS — see SESSION 10; `tools/live-smoke.mjs`) |
+| **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **IN PROGRESS** (**2a SHIPPED** — see SESSION 12; 2b/2c queued) |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -915,3 +916,283 @@ re-read of the plan docs). Findings → `FINDINGS.md` §"Bug hunt".
 ## Anti-loop discipline (continues)
 - Same closed recon: do NOT re-read `verify.mjs` / `S2sRouter` / `bridge` / `state`.
 - Next session touches only: (a) new failing line, (b) the one source it references.
+
+---
+
+# SESSION 11 (2026-09-22): Goal `3ea7bb53` — CONTENT-BRIDGE v2 — 2a recon CLOSED, implementation LOCKED
+
+## Scope (Goal 3ea7bb53, 4 discrete commits → `origin/test_federation`)
+| # | Item | TODO | Status |
+|---|------|------|--------|
+| 2a | export-project S2S (B-side) + adapter grant→(account, client) index + PAT mint + `findExistingGrant` no-re-consent | TODO-39131029 | recon DONE this session; implementation LOCKED below (next) |
+| 2b | home export wizard (A-side UI seam) | TODO-a35d4285 | queued |
+| 2c | git-bridge read-only 403 guard (`federation:`-prefixed PAT scope) + killOutstandingCodes-driven export sweep | TODO-02b80064 | queued |
+| 2d | two-real-origins (A≠B) live smoke (docker two-instance) | (closure of Goal 3ea7bb53) | queued |
+
+v1 identity federation is COMPLETE (live smoke 13/13, `tools/live-smoke.mjs`, commit `1ec14289`).
+`plan/09-content-bridge.md` is the wire authority (new). Envelope reconciliation (below)
+is LOCKED on top of it.
+
+## 2a recon — seams verified against SOURCE this session (do NOT re-verify)
+- **Consent grant payload**: `oidc-provider/lib/grant.js` `Grant.IN_PAYLOAD` includes
+  `accountId` AND `clientId` (via `...BaseToken.IN_PAYLOAD`) → the Redis Grant doc payload
+  carries both. `BaseModel.save(ttl)` → `adapter.upsert(this.jti, payload, ttl)` — the adapter
+  upsert is the single persist point; `payload.accountId/clientId` visible there.
+- **Grant is NOT `grantable`** → the `federation:oidc:grant:<grantId>` SET holds TOKEN docs
+  (codes/access/refresh), never the Grant doc. v9 `revokeByGrantId(grantId)` is per-TOKEN-model
+  (`AccessToken|AuthorizationCode|RefreshToken|DeviceCode.revokeByGrantId`) — it destroys
+  token docs via the adapter, but no model owns Grant docs → **there is NO v9 Grant-doc
+  revoke cascade**. Consequence: the (account, client) grant index is cascade-deleted ONLY
+  in (a) the adapter's `destroy` override and (b) `revokeClientCodes` sweep (both adapter-
+  owned). Grant docs die by TTL only (v9 grants live 30 days default — `grants: { lifetime }`;
+  ours via adapter `ttl` arg — check what `Grant.save` passes: `this.remainingTTL`).
+- **Consent bridge today** (`oidc/bridge.mjs`): consent POST does `provider.Grant.instantiate` +
+  `adapter.upsert(jti, payload, ttl)` — this is also the hook point for the (account, client)
+  index (adapter-side, so it catches bridge-external grants too).
+- **`provider.Grant` + `.instantiate` + `Grant.adapter`** available per v9 base_model.js
+  (provider.Grant = `this.Grant = BaseModel.create(...)`; `adapter` property on models).
+- **Project owner field = `owner_ref`** (`app/src/Project/ProjectController`-style; verify exact
+  model field before coding: `owner_ref: Types.ObjectId ref User`). B-native test:
+  owner doc `federation == null` (mirror rows carry the `federation` subdoc).
+- **PAT shape EXACT** (`modules/git-bridge/app/src/GitBridgePATManager.mjs` — re-read
+  this session, source of truth): `token = 'olp_' + 36 chars` from a 62-char alphabet
+  `[a-zA-Z0-9]` (crypto.randomInt loop; NOT randomBytes); `accessToken:
+  sha256(token).digest('hex')` stored (column literally named `accessToken`; raw token
+  NEVER persisted); `accessTokenPartial: token.substring(0, 8)`; `type:
+  'personal_access_token'`; `scope: 'git_bridge'` (string); `createdAt`, `expiresAt`
+  (createToken default 1 year via `setFullYear(+1)`). Matcher is the QUERY `scope:
+  /\bgit_bridge\b/` — a scope STRING `'federation:git_bridge'` PASSES (colon is a
+  non-word char; the `\b` boundary holds) and `'gitbridge'` FAILS. `getUserId(token)`:
+  prefix check → `findOne({ accessToken: sha256hex, type: 'personal_access_token',
+  scope: /\bgit_bridge\b/, expiresAt: { $gt: now } })` → user existence check →
+  non-blocking `lastUsedAt` update. Two consequences LOCKED: (a) **expiry is ALREADY
+  enforced** — 2a documents only, 2c adds the read-only 403 push-side guard, NOT
+  expiry; (b) the federation PAT scope = string `'federation:git_bridge'` — the
+  EXISTING git-bridge matcher passes unchanged, NO new matcher entry needed. The 2c
+  guard keys off the `federation:` prefix of that same scope string.
+- **git-bridge mount**: `modules/git-bridge/index.mjs` router.apply — confirm mount
+  prefix (candidate `https://<origin>/git/<projectId>`) before implementation; ONE
+  grep allowed.
+- **`db` handle**: `app/src/infrastructure/mongodb.mjs:63` `oauthAccessTokens:
+  internalDb.collection('oauth_access_tokens')`... NO — the EXACT line:
+  `oauthAccessTokens: internalDb.collection('oauthAccessTokens')` (raw collection).
+  Git-bridge imports `{ db }` from there with NO import-time connect (the app layer
+  owns the connection). From `modules/federation/s2s/actions/` the path is 5-up —
+  SAME depth class that caused the SESSION 10 adapter import bug: count levels and
+  verify by RUN, not by eye.
+- **Settings**: `federation` block at L1228-1247 — add `export: { enabled: false,
+  maxExportTtlSeconds: 86400 }` (2a), 2c adds `sweepOnRevoke: true`; 2b has nothing
+  (home-side is UI-only). `maxExportTtlSeconds` is a HARD cap; request TTL = min(request,
+  grant remaining, max). `Settings.security.sessionSecret` etc. unchanged.
+- **Rate-limit budget table** (`util/RateLimitStore.mjs`): add `{ 'export-project': { budget: 10,
+  windowSeconds: 120 } }`; key `federation:ratelimit:export:<callerOrigin>:<projectId>`
+  (B-side project _id is already a B-side identifier — safe in a Redis key). `export:<...>`
+  segment must NOT collide with the git-bridge `git_bridge:<projectId>` sweep key (it doesn't:
+  prefixes differ) — but it DOES look sweep-shaped if someone later changes the sweep key
+  regex; note in 2c.
+- **Redact**: `SECRET_KEY_DENYLIST` (or equivalent) — add `pat`. Audit rows: NEVER include a
+  PAT value, length, or expiry in `detail`/meta — allowed meta: `projectRef` (opaque string,
+  OK), `expiresAt`? NO — expiry only in the S2S response, not audit. Audit meta =
+  `{ projectId (B-side _id is local, OK — B-side audit, B-side id), scope, assertion }`.
+- **Audit types** (`util/Audit.mjs` AUDIT_TYPES): add `'federation_export_granted'` +
+  `'federation_export_denied'`. `audit()` is fire-and-forget; `projectId` = the B-side
+  project _id IS a valid ObjectId here (unlike S2S receipts which pass null) — pass it.
+- **New codes (wire)**: `export-disabled` (200, Settings off), `export-no-consent` (200,
+  no live consent grant for (owner, federationClientId(callerOrigin))), `project-not-owned`
+  (200 — project missing OR owner is a mirror row OR owner not the B-side user implied by
+  the consent grant). Peer-level refusals (`peer-not-approved` / `peer-unknown`) are
+  pre-existing at router ③. **LOCKED reconciliation**: these are 200+envelope business
+  refusals, NOT 401 — router ⑦ ordering (audit needs `result` to pick granted/denied) and the
+  envelope decision (401 = assertion level, 429 = rate, 200 = business) are LOCKED above.
+  `plan/09` "401s" phrasing = code-taxonomy shorthand; the WIRE is 200+envelope.
+- **findExistingGrant** (`oidc/bridge.mjs`): currently always `return null` (fresh grant
+  every consent). 2a wires it: `await adapter.findByAccountAndClient(accountId, ctx.client)`
+  → grant id → `provider.getGrantById(id)` (v9 `getGrantById` exists? — v9 has
+  `provider.getGrantById`? CHECK: oidc-provider v9 exposes `provider.getGrantById(id)` via
+  `modelFactory('Grant').load(id)`... use `provider.Grant.instantiate`? NO — use the v9
+  documented path (provider.js `getGrantById`). If the doc is gone, fall back to fresh
+  grant (existing behavior). NO RE-CONSENT is the v1.1 bonus this unlocks.
+- **Adapter index shape** (LOCKED): `federation:oidc:account:<accountId>:<clientId>` → SET of
+  grant doc keys (`federation:oidc:Grant:<jti>`), written SADD on Grant upsert, SREM on
+  Grant destroy, + cascade SREM in `revokeClientCodes` sweep. `findByAccountAndClient`:
+  SMEMBERS → for each member, GET doc → parse payload → `payload.accountId === accountId &&
+  payload.clientId === clientId` → PTTL ≥ 0 (live) → return grant id. v1: 1 consent grant per
+  (account, client); multiple live → return the LAST one returned by SMEMBERS (document as
+  v1-acceptable; dedupe is 2b+). Non-Grant upserts (no `accountId`+`clientId` pair) → skip
+  (existing `!payload.openid` skip covers it: consent grants carry scope openid — keep the
+  openid gate AND add the pair gate).
+
+## 2a build list (LOCKED — next session writes, runs, commits)
+Files: `s2s/actions/exportProject.mjs` (NEW), `s2s/S2sRouter.mjs` (ACTIONS map add, per-action
+audit branch for exportProject), `oidc/RedisOidcProviderAdapter.mjs` (account index + cascade +
+`findByAccountAndClient`), `oidc/bridge.mjs` (`findExistingGrant` wired), `oidf/verify.mjs`
+(+3 S2S_ERRORS codes), `util/RateLimitStore.mjs` (+budget), `config/settings.defaults.js`
+(+`federation.export`), `util/Audit.mjs` (+2 types), `util/Redact.mjs` (+`pat`),
+`tools/migrations/20260721150000_add_federation_export_indexes.mjs` (repo root —
+`federationExportGrants.owner/projectId` + `status/expiresAt`),
+`test/unit/s2s/exportProject.test.mjs` (NEW), `test/unit/integration/two-instance.sequential.test.mjs`
+(+export-project scenario section). Handler: settings gate → project lookup (owner_ref) →
+B-native check → consent grant check (adapter index) → mint (existing PAT row OR fresh)
+→ persist `federationExportGrants` row (status `exported`) → audit → respond
+`{ git_url, pat, expires_at }`. Idempotent re-export = fresh PAT ONLY on new consent OR
+explicit re-share (2b wizard decides). TTL = min(request ttl, grant remaining ttl,
+maxExportTtlSeconds). NO new Redis keys beyond the (account, client) index + the standard
+rate-limit key. NO new migrations beyond the export-grant indexes (PAT docs reuse the
+existing `oauthAccessTokens` collection — VERIFY name first).
+
+## Open questions answered (this recon closes plan/09 §open-questions for 2a)
+1. **git_url** → `https://<origin>/git/<projectId>` (origin = `Settings.siteUrl`
+   host; mount prefix confirmed by the one allowed grep before write).
+2. **PAT expiry enforcement** → ALREADY enforced in `GitBridgePATManager.getUserId`
+   (`expiresAt: { $gt: now }` in the find). 2a documents; 2c adds the 403 push-side guard.
+3. **Consent → mint binding** → owner B-native AND consent grant live for
+   (owner, federationClientId(callerOrigin)) → TTL-min clamp → mint.
+4. **Revoke cascade** → adapter `destroy` + sweep only (see seams above).
+5. **Settings knobs** → `export.enabled` (default false), `export.maxExportTtlSeconds` (86400);
+   `sweepOnRevoke` lands in 2c.
+6. **Rate-limit key** → `federation:ratelimit:export:<callerOrigin>:<projectId>` (budget 10/120s).
+7. **Audit** → `federation_export_granted` / `federation_export_denied`; projectId = B-side
+   _id (valid ObjectId); meta = `{ scope, assertion }` (redacted, NO pat/length/expiry).
+8. **`findExistingGrant`** → adapter index lookup, v9 `getGrantById` load, fallback fresh.
+
+## Anti-loop (2a implementation session)
+- Recon is CLOSED for 2a. The ONLY allowed re-reads during implementation: (a) the
+  git-bridge mount prefix (one grep), (b) the `oauthAccessTokens` collection name (one
+  grep), (c) the new failing test line + the one source it references. Max 3 iterations per
+  distinct failure signature. NO recon expansion.
+- v1 wire recon (verify.mjs / S2sRouter ordering / bridge dance) remains CLOSED from
+  SESSIONS 6-9.
+
+
+# SESSION 12 (2026-09-22): 2a IMPLEMENTED + VERIFIED (Goal `3ea7bb53`, step 2a of 4)
+
+## Scope (Goal 3ea7bb53, 4 discrete commits → `origin/test_federation`)
+| # | Item | TODO | Status |
+|---|------|------|--------|
+| 2a | export-project S2S (B-side) + adapter (account, client) index + PAT mint + findExistingGrant | TODO-39131029 | **DONE** this session (this entry) |
+| 2b | home export wizard (A-side UI seam) | TODO-a35d4285 | next (recon seams already in plan/09 §4.1 + SESSION 11) |
+| 2c | git-bridge read-only 403 guard + killOutstandingCodes-driven export sweep | TODO-02b80064 | queued (recon seam: 2a lock item (b) above) |
+| 2d | two-real-origins (A≠B) live smoke (docker two-instance) | (closure of Goal 3ea7bb53) | queued |
+
+## DONE this session (2a build list per the SESSION 11 LOCKED list)
+- **`s2s/actions/exportProject.mjs`** (NEW): settings gate → payload sanity →
+  project lookup (`owner_ref`) → owner B-native (mirror/suspended/missing → not-owned)
+  → consent binding (REAL `findByAccountAndClient` vs fake-free adapter;
+  client = `federationClientId(callerOrigin)`) → TTL-min clamp
+  (`min(request, grant pttl, maxExportTtlSeconds)`, soft-degrade on pttl<0) →
+  PAT mint (`olp_`+36, [a-zA-Z0-9], sha256 stored, partial=first 8,
+  `scope: 'federation:git_bridge'`, `type: 'personal_access_token'`,
+  `expiresAt`) → ledger upsert `federationExportGrants`
+  (owner/project/homeOrigin, `$setOnInsert createdAt`) → respond
+  `{ git_url, pat, expires_at }` (snake_case, SESSION 11 LOCKED).
+  git_url = `https://<Settings.siteUrl host>/git/<projectId>` (port-inclusive).
+- **`oidc/RedisOidcProviderAdapter.mjs`**: `federation:oidc:account:<accountId>:<clientId>`
+  SET index. SADD on Grant upsert ONLY (gated `modelName === 'Grant'`; token docs
+  stay EXCLUDED — the Grant doc is the owner of the pair); SREM cascade in adapter
+  `destroy` (same gate) and in `revokeClientCodes` sweep (same gate). NEW exports:
+  `findByAccountAndClient(r, accountId, clientId)` (scan account-key SET →
+  per-doc `pttl ≥ 0` gate → payload pair check → return jti, else null),
+  `accountIndexKey(accountId, clientId)`, `grantDocKey(jti)`. v1 = one consent grant
+  per (account, client) → the first live doc is the grant (09 §2.1 "short path";
+  the full `getGrantById` load in the OP bridge is the same short path).
+- **`oidc/bridge.mjs`**: `findExistingGrant` (01 §3 step 9 "no re-consent"
+  v1.1 item) wired to `findByAccountAndClient` — consent prompt now reuses the
+  live consent grant instead of minting a duplicate when one exists.
+- **`s2s/S2sRouter.mjs`**: ACTIONS map + `'export-project'`; ⑤ rate-limit key
+  `federation:ratelimit:export:<callerOrigin>:<projectId>` (LOCKED item 6 —
+  the short-action-name pattern that its siblings `authorize`/`revoke` use;
+  `export-project` full name was a first-draft drift, corrected); ⑦ audit branch
+  `exportGranted/exportDenied`, projectId = B-local _id, meta `{ origin, scope,
+  assertion }` (redacted — NO pat/length/expiry in the row).
+- **`app/models/FederationExportGrant.mjs`** (NEW): mirror-of-the-consent ledger
+  model (owner/projectId/homeOrigin + patHashPrefix + patId + scope + expiresAt +
+  status). NOT the consent store (consent = the v9 Grant doc + its TTL).
+- **`oidf/verify.mjs`**: +3 S2S_CODES (`export-disabled`, `export-no-consent`,
+  `project-not-owned`) — 200+envelope business refusals (LOCKED item 0, not 401).
+- **`util/RateLimitStore.mjs`**: + budget row `export-project: {10, 120 s}` +
+  the (caller, projectId) key variant.
+- **`util/Audit.mjs`**: + `federation_export_granted` / `federation_export_denied`.
+- **`util/Redact.mjs`**: + `pat` on the `SECRET_FIELDS` denylist (the audit store
+  would drop it even if a handler put it in meta — defense in depth; 2b response
+  path + 2c sweep re-read).
+- **`config/settings.defaults.js`**: + `federation.export: { enabled: false,
+  maxExportTtlSeconds: 86400 }` (09 §5; `sweepOnRevoke` = 2c).
+- **`tools/migrations/20260721150001_add_federation_export_indexes.mjs`** (NEW):
+  `federationExportGrants` `owner_status_1` + `expires_at_1`. Static-map keys
+  `federationExportGrants` + (`federationTrustAnchors`) added to
+  `tools/migrations/lib/mongodb.mjs` (the 130000 trust-anchor migration was
+  LATENT — no static-map key; both added, verified live).
+- **Open question (09 §open #git-PAT-expiry) RESOLVED**: git-bridge `expiresAt`
+  is enforced in `GitBridgePATManager.getUserId` (`expiresAt: { $gt: now }`) —
+  the 2a clamp IS the live expiry enforcement point; 2c sweep is belt-and-suspenders.
+  No change needed.
+
+## Tests (all GREEN, 163/163 in the module)
+- `test/unit/s2s/exportProject.test.mjs` (14 cases): settings gate, malformed →
+  not-owned, project-missing → not-owned, owner-missing → not-owned,
+  mirror-owner → not-owned, suspended-owner → not-owned,
+  no-consent → no-consent, happy (snake_case + sha256 + ledger + scope +
+  user_id + partial), idempotent re-export (fresh PAT, one ledger row),
+  TTL clamp (above max → clamp to max), TTL clamp (grant remaining shorter →
+  clamp to grant), grant gone (pttl -1 → soft degrade to max),
+  ledger failure → still export (PAT returned).
+- `test/unit/oidc/adapterAccountIndex.test.mjs` (7 cases, fake-redis): Grant
+  upsert → index, token-model exclusion, live lookup, unknown pair → null,
+  expired doc → null, destroy cascade (index-set reclaim), token-destroy does NOT
+  cascade (not-over-cross).
+- `test/unit/integration/two-instance.sequential.test.mjs` (cases 13–17,
+  ON TOP of the existing 12): export-disabled gate, full dance → export
+  happy (sha256 stored, raw PAT not persisted, ledger row), idempotent re-export
+  (fresh PAT, one row), no-consent (owner without grant — no mint), rate-limit
+  429 on the 11th call. MOCK ADDED: the action's `Project` + raw `mongodb` +
+  `FederationExportGrant` (app-level models — mocked at the module boundary per
+  the 2a lock "mock: peer/project model"; these three were a NEW seam that the
+  recon did NOT list, resolved this session by mocking them in the two-instance
+  file with the same globalThis pattern as `FederationPeer`).
+- Migration ran live against `fed-smoke-mongo` (127.0.0.1:27107/federation_smoke2a):
+  `owner_status_1` + `expires_at_1` indices on `federationExportGrants`;
+  migration row `20260721150001_add_federation_export_indexes` recorded.
+  Pre-existing infra (210 `test/unit/src` failures) UNRELATED (no
+  `test/unit/src` file imports `modules/federation` or reads `.export` — checked).
+
+## What 2b/2c inherit from 2a (recon seams already built)
+- **2b**: the A-side wizard is the `FederatedExportController` (09 §4.1) +
+  session-only view; it reads the `export-project` S2S response (now
+  snake_case `{ git_url, pat, expires_at }`) and renders a one-shot
+  `<form action="https://a.example/git/bridge" ...>` git-bridge push hint.
+  The A-side redaction (pat NOT in the audit log) is the 2b regression test
+  (the redact deny list is ALREADY wired by 2a — `pat` is in `SECRET_FIELDS`;
+  2b asserts it).
+- **2c**: `killOutstandingCodes`-driven export sweep (reuses SESSION 9's
+  `revoke` placement) → calls `killOutstandingCodes(callerOrigin, redis)`
+  (already exported) + a sweep of `federationExportGrants` (owner-lookup,
+  then delete on (owner, projectId) match) + a `FederationKey` lookup to
+  confirm "approved + active + killOutstandingCodes: true" (the flag is
+  already on the peer schema). 403 guard = git-bridge `receive-pack` +
+  a scoped-PAT check on the `federation:` prefix (the existing
+  `\bgit_bridge\b` matcher passes `federation:git_bridge` — see the SESSION
+  11 lock (b) "the EXISTING matcher passes unchanged, NO new matcher entry
+  needed").
+
+## Next (immediate = 2b)
+- `2b`: `FederatedExportController` + `app/views/federated-export.pug` (new)
+  — the A-side wizard (read the `export-project` S2S response, render a
+  one-time git push hint). Re-read `09 §4.1` + the SESSION 11 seam list
+  (items in "What 2b/2c inherit" above). The B-side response contract is
+  ALREADY SNAKE_CASE (`{ git_url, pat, expires_at }`) — 2b consumes that shape.
+- `2c`: `GitBridgeRouter` `receive-pack` 403 guard (scope check on
+  `federation:` prefix, 04 §5) + `revoke.mjs` sweep + `Settings` `sweepOnRevoke`
+  knob + test.
+- `2d`: two-real-origins docker smoke (A and B are different hosts; the
+  existing two-instance test uses single-origin because B plays both roles —
+  2d is the TRUE A≠B; it reuses the live-smoke `tools/live-smoke.mjs`
+  pattern from v1 (13/13) and adds the export scenario over the wire).
+
+## Anti-loop (2b/2c implementation sessions)
+- The 2a seams are BUILT. NO recon for 2b/2c. If 2b/2c needs `federationExportGrants`
+  schema, `federation:ratelimit:export:` key, or `export-disabled` code — those are
+  ALREADY in `verify.mjs` / `RateLimitStore.mjs` / the migration. NO new migration.
+- `pat` is in the `Redact.SECRET_FIELDS` denylist (2a wired it). 2b does NOT
+  re-add it; 2b asserts it's redacted (regression test).
+- 2c sweep reuses `killOutstandingCodes` (already exported from the adapter).
+  NO new adapter method.
