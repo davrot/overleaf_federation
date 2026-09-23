@@ -123,6 +123,13 @@ vi.mock('../../../oidc/RedisOidcProviderAdapter.mjs', async (importOriginal) => 
   }
 })
 
+// content-bridge 2c (09 §3.3): the export sweep (ledger + PATs). Spied —
+// the sweep body itself is covered in test/unit/s2s/revoke.test.mjs.
+vi.mock('../../../export/Sweep.mjs', () => ({
+  sweepExportGrants: vi.fn(async () => 0),
+  EXPORT_SCOPE: 'federation:git_bridge',
+}))
+
 vi.mock('../../../oidf/ClientAssertionClient.mjs', () => ({
   buildS2sRequest: vi.fn(async (origin, action, payload) => ({
     headers: { client_assertion: 'jwt-assertion' },
@@ -178,6 +185,7 @@ import { _resetForTest } from '../../../oidc/createProvider.mjs'
 import { revokeClientCodes } from '../../../oidc/RedisOidcProviderAdapter.mjs'
 
 import FederatedAdminController from '../../../admin/FederationAdminController.mjs'
+import { sweepExportGrants } from '../../../export/Sweep.mjs'
 
 describe('FederationAdminController (P1, 07 §P1)', () => {
   let Mod
@@ -200,6 +208,7 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
     }
     Mod = FederatedAdminController
     audit.mockClear?.()
+    sweepExportGrants.mockClear?.()
   })
 
   function auditCalls() {
@@ -692,6 +701,28 @@ describe('FederationAdminController (P1, 07 §P1)', () => {
       // outbound S2S never blocks the admin action: local revoke is still
       // 200, revocation downgrades to 'local-only'.
       expect(res.jsonCalls[0].revocation).toBe('local-only')
+    })
+
+    it('revoke: export sweep (2c) runs on the transition, flag-INDEPENDENT', async () => {
+      const d = {
+        origin: 'beta.example',
+        status: 'approved',
+        approvedAt: new Date(),
+        save: vi.fn(),
+      }
+      globalThis.__PEERS = { 'beta.example': d }
+      globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }))
+
+      await Mod.handleRevoke({ params: { origin: 'beta.example' } }, mkRes())
+      // 09 §5: settings-driven (sweepOnRevoke default ON) — NOT keyed on
+      // the flag (the flag above is the oidc code-sweep, 06 §179).
+      expect(sweepExportGrants).toHaveBeenCalledTimes(1)
+      expect(sweepExportGrants.mock.calls[0][0]).toBe('beta.example')
+
+      // Idempotent double-revoke: no second sweep (no transition).
+      d.status = 'revoked'
+      await Mod.handleRevoke({ params: { origin: 'beta.example' } }, mkRes())
+      expect(sweepExportGrants).toHaveBeenCalledTimes(1)
     })
   })
 

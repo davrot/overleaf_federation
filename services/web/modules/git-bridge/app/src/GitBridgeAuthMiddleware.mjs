@@ -24,7 +24,26 @@ export default function ensureTokenProjectAccess(permission) {
         return res.sendStatus(401)
       }
 
-      const userId = await GitBridgePATManager.getUserId(token)
+      // The write path (receive-pack push → snapshot postback) resolves the
+      // token WITH its scope: content-bridge export PATs (scope
+      // `federation:git_bridge`) are read-only — push must be refused at
+      // the wire (plan 09 §4, 2c). The marker is the token's scope string;
+      // git-bridge does NOT import the federation module.
+      const identity =
+        permission === 'write'
+          ? await GitBridgePATManager.getUserIdAndScope(token)
+          : null
+      if (identity &&
+        typeof identity.scope === 'string' &&
+        identity.scope.startsWith('federation:')) {
+        logger.warn(
+          { scope: identity.scope, projectId },
+          'git-bridge: federation write refused (read-only export PAT)'
+        )
+        return res.sendStatus(403)
+      }
+
+      const userId = identity ? identity.userId : await GitBridgePATManager.getUserId(token)
       if (!userId) return res.sendStatus(401)
 
       const allowed = await checkPermission(userId, projectId, null)

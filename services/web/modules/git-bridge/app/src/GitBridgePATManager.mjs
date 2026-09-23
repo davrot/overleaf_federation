@@ -86,7 +86,16 @@ const GitBridgePATManager = {
     return result?.deletedCount || 0
   },
 
-  async getUserId(token) {
+  // content-bridge 2c (plan 09 §4): a scope-aware mirror of `getUserId` so
+  // the git-bridge write path (`receive-pack` → snapshot postback) can
+  // refuse `federation:`-scoped export PATs (read-only) WITHOUT importing
+  // the federation module — the marker is the token's scope string
+  // (`federation:git_bridge`, minted by B's export-project S2S). The
+  // git-bridge auth regex `/\bgit_bridge\b/` matches both `git_bridge`
+  // (user PATs) and `federation:git_bridge` (export PATs) because `:` is a
+  // non-word boundary, so the write path must distinguish by the `federation:`
+  // prefix itself.
+  async getUserIdAndScope(token) {
     if (!token?.startsWith(PAT_PREFIX)) return null
 
     const now = new Date()
@@ -96,7 +105,7 @@ const GitBridgePATManager = {
         type: 'personal_access_token',
         scope: /\bgit_bridge\b/,
         expiresAt: { $gt: now }
-      }, { projection: { user_id: 1 } }
+      }, { projection: { user_id: 1, scope: 1 } }
     )
 
     if (!objToken?.user_id) return null
@@ -118,7 +127,12 @@ const GitBridgePATManager = {
       logger.error({ err }, 'Failed to update lastUsedAt')
     )
 
-    return objToken.user_id
+    return { userId: objToken.user_id, scope: objToken.scope }
+  },
+
+  async getUserId(token) {
+    const info = await this.getUserIdAndScope(token)
+    return info ? info.userId : null
   },
 }
 

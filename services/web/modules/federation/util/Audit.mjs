@@ -129,4 +129,7 @@ export const AUDIT_TYPES = {
   // 2b: A-side wizard audit (plan 09 §3.2 — meta { origin, scope } +
   // reason; NEVER the PAT, git_url, or expiry — those are B-side facts).
   exportRequested: 'federation_export_requested',
+  // 2c: export sweep on revoke (plan 09 §3.3 — meta { origin, scope };
+  // redacted; the PAT value is never a field).
+  exportSwept: 'federation_export_swept',
 }

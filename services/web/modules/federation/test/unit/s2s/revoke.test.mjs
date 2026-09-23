@@ -20,7 +20,14 @@ vi.mock('@overleaf/settings', () => ({
   default: {
     siteUrl: 'https://alpha.example',
     security: { sessionSecret: 'unit-test-secret' },
-    federation: { enabled: true },
+    federation: {
+      enabled: true,
+      // content-bridge 2c (09 §5): the export block is test-driven —
+      // undefined (default) keeps `sweepOnRevoke` ON.
+      get export() {
+        return globalThis.__exportSettings
+      },
+    },
   },
 }))
 
@@ -77,6 +84,57 @@ vi.mock('../../../app/models/FederationPeer.mjs', () => ({
   },
 }))
 
+// ── content-bridge 2c (09 §3.3/§5): the export sweep (Sweep.mjs) runs in
+//    this file (revoke.mjs imports it) — mock its three seams (no mongo in
+//    the unit path). NOTE: vi.mock factories CANNOT reference module-scope
+//    bindings; the thunk pattern (globalThis) is the sanctioned shape.
+
+vi.mock('../../../../../app/src/infrastructure/mongodb.mjs', () => ({
+  // Sweep.mjs imports { db, ObjectId } — mongodb-legacy style.
+  ObjectId: class ObjectId {
+    constructor(s) {
+      this.s = String(s)
+    }
+  },
+  connectionPromise: Promise.resolve(),
+  db: {
+    oauthAccessTokens: {
+      deleteOne: async query => {
+        ;(globalThis.__sweepPatDeletes ??= []).push(query)
+        if (globalThis.__sweepDeleteOneFail) {
+          throw new Error('mongo down')
+        }
+        return { deletedCount: 1 }
+      },
+    },
+  },
+}))
+
+vi.mock('../../../app/models/FederationExportGrant.mjs', () => ({
+  FederationExportGrant: {
+    find: filter => ({
+      select: () => ({
+        lean: async () => {
+          globalThis.__sweepFindFilter = filter
+          return globalThis.__sweepLedgerRows ?? []
+        },
+      }),
+    }),
+    updateMany: async filter => {
+      ;(globalThis.__sweepUpdateMany ??= []).push(filter)
+      return { matchedCount: 0, modifiedCount: 0 }
+    },
+  },
+  FederationExportGrantSchema: {},
+}))
+
+vi.mock('../../../util/Audit.mjs', () => ({
+  audit: async args => {
+    ;(globalThis.__sweepAudits ??= []).push(args)
+  },
+  AUDIT_TYPES: { exportSwept: 'federation_export_swept' },
+}))
+
 import {
   revokeClientCodes,
 } from '../../../oidc/RedisOidcProviderAdapter.mjs'
@@ -87,6 +145,15 @@ describe('S2S revoke action (03 §4.3, 04 §5)', () => {
     globalThis.__providerResets = 0
     globalThis.__revokeUpdateOneResult = undefined
     globalThis.__sweepResult = 0
+    // 2c export-sweep seams (Sweep.mjs is REAL here — the throttle is the
+    // settings gate + the modifiedCount transition guard).
+    globalThis.__exportSettings = undefined // undefined → sweepOnRevoke ON
+    globalThis.__sweepLedgerRows = []
+    globalThis.__sweepPatDeletes = []
+    globalThis.__sweepUpdateMany = []
+    globalThis.__sweepAudits = []
+    globalThis.__sweepFindFilter = undefined
+    globalThis.__sweepDeleteOneFail = false
     revokeClientCodes.mockReset()
   })
 
@@ -178,5 +245,77 @@ describe('S2S revoke action (03 §4.3, 04 §5)', () => {
     })
     expect(result.ok).toBe(true)
     expect(globalThis.__providerResets).toBe(1)
+  })
+
+  // ── 2c (09 §3.3/§5): the export sweep — settings-driven (default ON),
+  //    INDEPENDENT of the `killOutstandingCodes` flag above (that one is
+  //    the oidc-provider code sweep, 06 §179).
+
+  it('revoke transition + default settings → export sweep (ledger + PATs + audit)', async () => {
+    globalThis.__sweepLedgerRows = [{ patId: 'pat-1' }, { patId: 'pat-2' }]
+    const result = await revoke({
+      body: { payload: { origin: 'this-connection' } },
+      callerOrigin: 'beta.example',
+    })
+    expect(result.ok).toBe(true)
+    // The sweep runs even with the flag ABSENT (settings-driven, 09 §5).
+    expect(globalThis.__sweepFindFilter).toEqual({ homeOrigin: 'beta.example' })
+    // Both PAT docs deleted, scope-guarded (09 §3: a ledger row can only
+    // name an export-scope token).
+    expect(globalThis.__sweepPatDeletes).toHaveLength(2)
+    expect(
+      globalThis.__sweepPatDeletes[0].scope,
+    ).toBe('federation:git_bridge')
+    expect(globalThis.__sweepUpdateMany).toEqual([{ homeOrigin: 'beta.example' }])
+    const swept = globalThis.__sweepAudits.filter(
+      a => a.operation === 'federation_export_swept',
+    )
+    expect(swept).toHaveLength(1)
+    // Redaction (09 §3): origin + constant scope — never a PAT value/hash.
+    expect(swept[0].meta).toEqual({
+      origin: 'beta.example',
+      scope: 'federation:git_bridge',
+    })
+  })
+
+  it('sweepOnRevoke: false → export sweep disabled (v1 NO-OP preserved)', async () => {
+    globalThis.__exportSettings = { sweepOnRevoke: false }
+    globalThis.__sweepLedgerRows = [{ patId: 'pat-1' }]
+    const result = await revoke({
+      body: { payload: { origin: 'this-connection' } },
+      callerOrigin: 'beta.example',
+    })
+    expect(result.ok).toBe(true)
+    expect(globalThis.__sweepFindFilter).toBeUndefined()
+    expect(globalThis.__sweepPatDeletes).toEqual([])
+    expect(globalThis.__sweepUpdateMany).toEqual([])
+    expect(globalThis.__sweepAudits).toEqual([])
+  })
+
+  it('idempotent double receipt (no write) → export sweep skipped (no double sweep)', async () => {
+    globalThis.__revokeUpdateOneResult = { matchedCount: 0, modifiedCount: 0 }
+    const result = await revoke({
+      body: { payload: { origin: 'this-connection' } },
+      callerOrigin: 'beta.example',
+    })
+    expect(result.ok).toBe(true)
+    expect(globalThis.__sweepFindFilter).toBeUndefined()
+    expect(globalThis.__sweepPatDeletes).toEqual([])
+  })
+
+  it('export sweep best-effort: a PAT delete failure never fails the revocation', async () => {
+    globalThis.__sweepLedgerRows = [{ patId: 'pat-1' }]
+    globalThis.__sweepDeleteOneFail = true
+    const result = await revoke({
+      body: { payload: { origin: 'this-connection' } },
+      callerOrigin: 'beta.example',
+    })
+    expect(result.ok).toBe(true)
+    // ledger still transitioned + audit still written (per-row
+    // best-effort, 03 §4.3: sweep never blocks the revocation).
+    expect(globalThis.__sweepUpdateMany).toEqual([{ homeOrigin: 'beta.example' }])
+    expect(
+      globalThis.__sweepAudits.some(a => a.operation === 'federation_export_swept'),
+    ).toBe(true)
   })
 })

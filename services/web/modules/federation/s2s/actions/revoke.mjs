@@ -32,6 +32,7 @@ import { FederationPeer } from '../../app/models/FederationPeer.mjs'
 import { _resetProviderMemo } from '../../oidc/createProvider.mjs'
 import { federationClientId } from '../../oidc/clients.mjs'
 import { revokeClientCodes } from '../../oidc/RedisOidcProviderAdapter.mjs'
+import { sweepExportGrants } from '../../export/Sweep.mjs'
 import logger from '@overleaf/logger'
 
 import { S2S_ERRORS } from '../../oidf/verify.mjs'
@@ -74,6 +75,20 @@ export default async function revoke({ body, callerOrigin, peer }) {
       } catch (error) {
         logger.warn({ error, origin: callerOrigin }, 'federation: code sweep after revoke failed')
       }
+    }
+    // content-bridge 2c (09 §3.3): the export side of `killOutstandingCodes` —
+    // sweep the grant ledger + minted PATs for that home origin. Gated by
+    // `Settings.federation.export.sweepOnRevoke` (default on; off = v1
+    // NO-OP), INDEPENDENT of the `killOutstandingCodes` flag above (that
+    // one gates the oidc-provider code sweep, 06 §179). Best-effort —
+    // never fails/rolls back the revocation (03 §4.3 effects list).
+    try {
+      await sweepExportGrants(callerOrigin)
+    } catch (error) {
+      logger.warn(
+        { error, origin: callerOrigin },
+        'federation: export sweep after revoke failed'
+      )
     }
   }
 

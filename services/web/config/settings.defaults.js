@@ -1246,6 +1246,7 @@ module.exports = {
     export: {
       enabled: false, // B-side: allow export-project S2S
       maxExportTtlSeconds: 86400, // cap for payload.expiresAt
+      sweepOnRevoke: true, // 2c: killOutstandingCodes' export side (09 §3.3); off = v1 NO-OP
     },
   },
 

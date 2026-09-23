@@ -53,6 +53,7 @@ import { FederationTrustAnchor } from '../app/models/FederationTrustAnchor.mjs'
 import { _resetProviderMemo } from '../oidc/createProvider.mjs'
 import { federationClientId } from '../oidc/clients.mjs'
 import { revokeClientCodes } from '../oidc/RedisOidcProviderAdapter.mjs'
+import { sweepExportGrants } from '../export/Sweep.mjs'
 import { buildS2sRequest } from '../oidf/ClientAssertionClient.mjs'
 import { createKeyProvider } from '../oidf/keystore.mjs'
 import { audit, AUDIT_TYPES } from '../util/Audit.mjs'
@@ -481,6 +482,15 @@ async function handleRevoke(req, res) {
       } catch (error) {
         logger.warn({ error, origin: peer.origin }, 'federation: code sweep after revoke failed')
       }
+    }
+    // content-bridge 2c (09 §3.3): the export side of `killOutstandingCodes` —
+    // sweep the grant ledger + minted PATs for that home origin. Gated by
+    // `Settings.federation.export.sweepOnRevoke` (default on; off = v1
+    // NO-OP); best-effort (never fails the revocation — see the s2s twin).
+    try {
+      await sweepExportGrants(peer.origin)
+    } catch (error) {
+      logger.warn({ error, origin: peer.origin }, 'federation: export sweep after revoke failed')
     }
 
     await audit({
