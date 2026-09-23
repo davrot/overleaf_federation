@@ -258,3 +258,16 @@ export async function handleExport(req, res) {
     },
   })
 }
+
+// House pattern (mirror invite/FederatedInviteController.mjs): a named
+// const + default so `import FederatedExportController from './...'.mjs'`
+// (FederatedExportRouter, index.mjs) resolves to the handler object, not
+// `undefined` (named exports above stay for tests). The router is
+// default-imported; a named-only module here is `undefined` at
+// `router.apply` → app boot (Modules.applyRouter) would throw.
+export const FederatedExportController = {
+  handleExportFormGet,
+  handleExport,
+}
+
+export default FederatedExportController
