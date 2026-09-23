@@ -114,6 +114,17 @@ vi.mock('../../../s2s/actions/revoke.mjs', () => ({
   },
 }))
 
+vi.mock('../../../s2s/actions/exportProject.mjs', () => ({
+  // content-bridge v2 (plan 09 §2): the real action's import graph
+  // reaches app/src Project/mongodb (Mongoose) — stubbed at the router
+  // boundary (the unit scope is router ordering, not the action body;
+  // `exportProject.test.mjs` + the two-instance file cover it).
+  default: async (ctx) => {
+    globalThis.__actions.push(ctx)
+    return globalThis.__actionResult ?? { ok: true, payload: { git_url: 'g' } }
+  },
+}))
+
 vi.mock('../../../util/Audit.mjs', () => ({
   audit: async (args) => {
     globalThis.__auditCalls.push(args)
@@ -122,6 +133,8 @@ vi.mock('../../../util/Audit.mjs', () => ({
     inviteApproved: 'federation_invite_approved',
     inviteDenied: 'federation_invite_denied',
     trustRevoked: 'federation_trust_revoked',
+    exportGranted: 'federation_export_granted',
+    exportDenied: 'federation_export_denied',
   },
 }))
 

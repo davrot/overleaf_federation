@@ -8,6 +8,9 @@
 //   federation:ratelimit:authorize:<callerOrigin>:<localNameHash>  30 / 120 s
 //   federation:ratelimit:invited:<callerOrigin>:<localNameHash>    30 / 120 s
 //   federation:ratelimit:revoke:<callerOrigin>                     5  / 1200 s
+//   federation:ratelimit:export:<callerOrigin>:<projectId>          10 / 120 s
+//     (content-bridge v2, plan 09 §2 — plan 03 §6 budget table grows by
+//     one row at 2a; plan 03 is P0-authority and is NOT retro-edited)
 //
 // `<localNameHash>` = saltedLocalNameHash (util/Anchor.mjs) over the
 // INVITEE's wire values (`invitee.localName`, `invitee.origin`) — the spec
@@ -28,6 +31,7 @@ export const RATE_LIMITS = {
   'authorize-invite': { budget: 30, windowSeconds: 120 },
   invited: { budget: 30, windowSeconds: 120 },
   revoke: { budget: 5, windowSeconds: 1200 },
+  'export-project': { budget: 10, windowSeconds: 120 },
 }
 
 // ioredis (via @overleaf/redis-wrapper). Feature key 'federation' falls
@@ -48,16 +52,20 @@ export function getRateLimitRedis(redis) {
  * @param {ioredis|null} redis  client override (tests); fallback: the
  *   module client / test fake
  * @param {object} opts
- * @param {string} opts.action 'authorize-invite' | 'invited' | 'revoke'
+ * @param {string} opts.action 'authorize-invite' | 'invited' | 'revoke' |
+ *   'export-project'
  * @param {string} opts.callerOrigin the S2S wire's `from` (caller origin)
  * @param {string} [opts.localNameHash] saltedLocalNameHash of the INVITEE
- *   wire values (invite action key component; omitted for `revoke`)
+ *   wire values (invite action key component; omitted for `revoke` and
+ *   `export-project`)
+ * @param {string} [opts.projectId] the B-local project id (export-project
+ *   key component only — a B-side identifier, safe in a Redis key).
  * @returns {Promise<{ allowed: boolean, retryAfterSeconds?: number }>}
  *   `retryAfterSeconds` = remaining window TTL (the 429 header).
  */
 export async function checkRateLimit(
   redis,
-  { action, callerOrigin, localNameHash },
+  { action, callerOrigin, localNameHash, projectId = null },
 ) {
   const limit = RATE_LIMITS[action]
   if (!limit) {
@@ -68,7 +76,9 @@ export async function checkRateLimit(
   const key =
     action === 'revoke'
       ? `federation:ratelimit:revoke:${callerOrigin}`
-      : `federation:ratelimit:${action}:${callerOrigin}:${localNameHash}`
+      : action === 'export-project'
+        ? `federation:ratelimit:export:${callerOrigin}:${projectId}`
+        : `federation:ratelimit:${action}:${callerOrigin}:${localNameHash}`
 
   const client = getRateLimitRedis(redis)
   const count = await client.incr(key)

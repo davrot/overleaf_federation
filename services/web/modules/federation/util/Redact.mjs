@@ -55,8 +55,11 @@ export function redact(value) {
 function isSecretKey(key, v) {
   const lower = key.toLowerCase()
   // Whole-object secrets (OIDC wire values, tokens, private material).
+  // `pat` (content-bridge v2, plan 09 §2): the short-lived export PAT
+  // NEVER lands in logs / audit (the redaction regression test asserts
+  // a `pat` key is scrubbed from both).
   if (
-    ['id_token', 'code', 'privatekey', 'private_key', 'secret', 'client_secret', 'access_token', 'encryptedtoken'].includes(lower)
+    ['id_token', 'code', 'privatekey', 'private_key', 'secret', 'client_secret', 'access_token', 'encryptedtoken', 'pat'].includes(lower)
   ) {
     return true
   }

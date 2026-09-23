@@ -25,6 +25,17 @@
  *                                        client (04 §5 `killOutstandingCodes`
  *                                        sweep index — token docs only, see
  *                                        `revokeClientCodes`)
+ *   federation:oidc:account:<accountId>:<clientId>
+ *                             -> SET of grant-doc keys (content-bridge
+ *                                v2 plan 09 §2.1 — secondary index for
+ *                                `findByAccountAndClient`). Written SADD on
+ *                                Grant-model upsert, SREM on Grant destroy
+ *                                (cascade lives in `destroy`, the single
+ *                                grant-doc removal path; the index is NOT
+ *                                in the `grant:`-sweep set because a Grant
+ *                                is not `grantable`). Stale members from
+ *                                TTL expiry are skipped by
+ *                                `findByAccountAndClient` (pttl < 0).
  *
  * `upsert(id, payload, expiresIn)` is the ONLY persistence point
  * (base_model.js save()), per model (AuthorizationCode: 120 s, Grant:
@@ -47,6 +58,56 @@ const GRANTABLE = new Set([
   'BackchannelAuthenticationRequest',
   'PreAuthorizedCode',
 ])
+
+export function accountIndexKey(accountId, clientId) {
+  return `federation:oidc:account:${accountId}:${clientId}`
+}
+
+/**
+ * The Grant model doc key in Redis (`federation:oidc:Grant:<jti>`)
+ * (09 §2.1 TTL clamp + 2a export's grant-remaining read use this).
+ * @param {string} grantId the grant jti
+ * @returns {string} the redis doc key
+ */
+export function grantDocKey(grantId) {
+  return `federation:oidc:Grant:${grantId}`
+}
+
+/**
+ * Content-bridge v2 (plan 09 §2.1): return the live consent grant jti
+ * for (accountId, clientId), or null. Scans the account-key SET, resolves
+ * each member doc, and returns the first LIVE (pttl ≥ 0) doc whose payload
+ * still holds the same (accountId, clientId) pair. v1 consent dedup: the
+ * first live grant wins; multi-consent dedup is v2.2+. Never throws —
+ * a Redis/parse error is a soft no-consent (the export path re-checks
+ * the grant via `provider.Grant` load, so a stale index degrades to a
+ * fresh consent, mirroring v1 `findExistingGrant` behavior).
+ *
+ * @param {object} r redis client (injected / from `getClient`)
+ * @param {string} accountId B-side user id (string)
+ * @param {string} clientId `urn:overleaf-federation:client:<origin>`
+ * @returns {Promise<string|null>} the grant jti, or null
+ */
+export async function findByAccountAndClient(r, accountId, clientId) {
+  const key = accountIndexKey(accountId, clientId)
+  const members = await r.smembers(key)
+  for (const memberKey of members) {
+    const raw = await r.get(memberKey)
+    if (raw == null) continue
+    const ttl = await r.pttl(memberKey)
+    if (ttl < 0) continue // expired by TTL
+    let payload
+    try {
+      payload = JSON.parse(raw)
+    } catch {
+      continue
+    }
+    if (payload.accountId !== accountId) continue
+    if (payload.clientId !== clientId) continue
+    return payload.jti
+  }
+  return null
+}
 
 /**
  * Build the adapter factory. With no argument the Redis client is
@@ -174,6 +235,15 @@ function createAdapterInstance(modelName, getClient) {
       if (GRANTABLE.has(modelName) && payload.grantId) {
         await r.sadd(`federation:oidc:grant:${payload.grantId}`, key)
       }
+      // Account secondary index (content-bridge v2, plan 09 §2.1). A
+      // Grant doc is the consent record and the single owner of an
+      // (account, client) pair; token docs (GRANTABLE) are NOT grant
+      // owners and never enter this set. `findByAccountAndClient` gates
+      // on the doc pttl, so stale TTL members are skipped, not errors.
+      if (modelName === 'Grant' && payload.accountId != null && payload.clientId != null) {
+        const acctKey = accountIndexKey(payload.accountId, payload.clientId)
+        await r.sadd(acctKey, key)
+      }
       // Client sweep index (04 §5 `killOutstandingCodes`): TOKEN docs
       // (GRANTABLE models) persist a `clientId` payload (BaseToken
       // IN_PAYLOAD) and are recorded under the minting client (see
@@ -230,6 +300,18 @@ function createAdapterInstance(modelName, getClient) {
         const payload = JSON.parse(raw)
         if (payload.uid != null) await r.del(`federation:oidc:sub:${payload.uid}`)
         if (payload.userCode != null) await r.del(`federation:oidc:usercode:${payload.userCode}`)
+        // Account secondary index cascade (content-bridge v2): a Grant
+        // doc is the single owner of its (account, client) pair. SREM
+        // from the pair's SET when the grant doc is removed. Non-Grant
+        // models never entered the set (upsert gate), so no-op.
+        if (modelName === 'Grant' && payload.accountId != null && payload.clientId != null) {
+          const acctKey = accountIndexKey(payload.accountId, payload.clientId)
+          await r.srem(acctKey, key)
+          const remainingAcct = await r.scard(acctKey)
+          if (remainingAcct === 0) {
+            await r.del(acctKey)
+          }
+        }
         if (GRANTABLE.has(modelName) && payload.grantId) {
           await r.srem(`federation:oidc:grant:${payload.grantId}`, key)
           const remaining = await r.scard(`federation:oidc:grant:${payload.grantId}`)

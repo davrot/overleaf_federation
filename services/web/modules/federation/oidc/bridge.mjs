@@ -40,8 +40,10 @@
 import path from 'node:path'
 import logger from '@overleaf/logger'
 import SessionManager from '../../../app/src/Features/Authentication/SessionManager.mjs'
+import RedisWrapper from '../../../app/src/infrastructure/RedisWrapper.mjs'
 
 import { getOidcProvider } from './createProvider.mjs'
+import { findByAccountAndClient } from './RedisOidcProviderAdapter.mjs'
 
 const __dirname = new URL('.', import.meta.url).pathname
 const CONSENT_VIEW = path.resolve(__dirname, '../app/views/consent.pug')
@@ -189,16 +191,27 @@ async function renderConsent(provider, req, res, interaction) {
 }
 
 async function findExistingGrant(provider, userId, clientId) {
-  // v9 Grant model: find by (accountId, clientId) via adapter secondary
-  // index `grant:<accountId>`. Not exposed on the public Grant API in v9.12.2;
-  // we fall back to the grant-lookup-by-(accountId, clientId) path.
-  // In v1 we accept a fresh Grant per consent — plan 01 §3 step 9
-  // ("no re-consent") relies on the same-screen UX but NOT on a
-  // grant-per-(accountId,client) deduplication; the grant is saved
-  // in Redis with TTL 30 d and re-used by the OP's Session.loginAccount
-  // path (session.resetIdentifier when !session.new).
-  //
-  // Return null → caller renders the form. (In v1.1 we will add an
-  // adapter method `findByClientAndAccount` to short-circuit.)
-  return null
+  // v1.1 (plan 01 §3 step 9, "no re-consent"; 2a LOCKED SESSION 11):
+  // look up the LIVE consent grant for this (accountId, clientId) via
+  // the adapter account index (written on Grant upsert, cascade-deleted
+  // on Grant destroy). Hydrate it with v9 `Grant.instantiate` (the
+  // stored payload is the exact pickPayload shape) and return it — the
+  // caller saves + reuses (TTL refresh, no re-consent). Any miss (no
+  // index, doc gone by TTL, payload mismatch, lookup error) falls back
+  // to null → fresh grant (v1 behavior). Soft-degrade: a lookup failure
+  // NEVER changes the consent outcome (a fresh grant is always valid).
+  try {
+    const redis = await RedisWrapper.client('federation')
+    const grantId = await findByAccountAndClient(redis, String(userId), clientId)
+    if (!grantId) return null
+    const stored = await provider.Grant.adapter.find(grantId)
+    if (!stored) return null
+    if (stored.accountId !== String(userId) || stored.clientId !== clientId) {
+      return null
+    }
+    return provider.Grant.instantiate(stored)
+  } catch (err) {
+    logger.debug({ err, userId, clientId }, 'bridge: findExistingGrant missed')
+    return null
+  }
 }

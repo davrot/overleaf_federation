@@ -49,6 +49,9 @@ const META_FIELDS = [
   'direction',
   'assertion',
   'reason',
+  // content-bridge v2 (plan 09 §3): the scope marker on export audits
+  // (the string 'federation:git_bridge' — a constant, never a secret).
+  'scope',
 ]
 
 function filterMeta(meta) {
@@ -114,4 +117,7 @@ export const AUDIT_TYPES = {
   inviteApproved: 'federated_invite_approved',
   inviteDenied: 'federated_invite_denied',
   sessionIssued: 'federation_session_issued',
+  // content-bridge v2 (plan 09 §3)
+  exportGranted: 'federation_export_granted',
+  exportDenied: 'federation_export_denied',
 }

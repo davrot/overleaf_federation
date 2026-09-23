@@ -68,7 +68,13 @@ vi.mock('@overleaf/settings', () => {
   const s = {
     siteUrl: 'https://beta.example',
     security: { sessionSecret: 'federation-test-session-secret-0000000000000000' },
-    federation: { enabled: true, keyRotationGraceDays: 14, institutionAuthorityHints: [] },
+    federation: {
+      enabled: true,
+      keyRotationGraceDays: 14,
+      institutionAuthorityHints: [],
+      // content-bridge v2 (plan 09 §5) — the export gate + TTL cap.
+      export: { enabled: true, maxExportTtlSeconds: 86400 },
+    },
     redis: { web: { host: '127.0.0.1', port: 6379 } },
   }
   globalThis.__SETTINGS = s
@@ -141,10 +147,27 @@ vi.mock('../../../app/models/FederationPeer.mjs', () => {
 // ── vi.mock: app/src models + services ───────────────────────────────────────
 vi.mock('../../../../../app/src/models/User.mjs', () => {
   globalThis.__USERS = globalThis.__USERS ?? []
-  const chain = value => ({
-    lean: () => Promise.resolve(value),
-    then: (a, b) => Promise.resolve(value).then(a, b),
-  })
+  function chain(getValue) {
+    let catchHandler = null
+    const obj = {
+      select: () => obj,
+      lean: () => obj,
+      catch: (f) => {
+        catchHandler = f
+        return obj
+      },
+      then: (ok, fail) =>
+        Promise.resolve()
+          .then(getValue)
+          .catch(e =>
+            catchHandler
+              ? Promise.resolve(catchHandler(e))
+              : Promise.reject(e),
+          )
+          .then(ok, fail),
+    }
+    return obj
+  }
   const findUser = filter =>
     globalThis.__USERS.find((u) => {
       if (filter.federation?.origin != null) {
@@ -164,7 +187,7 @@ vi.mock('../../../../../app/src/models/User.mjs', () => {
       return false
     }) ?? null
   const model = {
-    findOne: filter => chain(findUser(filter)),
+    findOne: filter => chain(() => findUser(filter)),
     findById: id =>
       Promise.resolve(
         globalThis.__USERS.find(u => String(u._id) === String(id)) ?? null,
@@ -183,6 +206,80 @@ vi.mock('../../../../../app/src/models/User.mjs', () => {
   }
   return { User: model, UserSchema: {} }
 })
+
+// ── vi.mock: app/src Project + raw mongodb + the export ledger model ─────
+// (content-bridge v2: the `export-project` action's import graph reaches
+// Mongoose.mjs at import time — mock before any test file imports the
+// router chain: S2sRouter → exportProject.mjs → Project/mongodb/FeExportGrant)
+vi.mock('../../../../../app/src/models/Project.mjs', () => {
+  globalThis.__PROJECTS = globalThis.__PROJECTS ?? []
+  function chain(getValue) {
+    let catchHandler = null
+    const obj = {
+      select: () => obj,
+      lean: () => obj,
+      catch: (f) => {
+        catchHandler = f
+        return obj
+      },
+      then: (ok, fail) =>
+        Promise.resolve()
+          .then(getValue)
+          .catch(e =>
+            catchHandler
+              ? Promise.resolve(catchHandler(e))
+              : Promise.reject(e),
+          )
+          .then(ok, fail),
+    }
+    return obj
+  }
+  return {
+    Project: {
+      findOne: filter =>
+        chain(
+          () =>
+            globalThis.__PROJECTS.find(
+              p => String(p._id) === String(filter._id),
+            ) ?? null,
+        ),
+    },
+  }
+})
+
+vi.mock('../../../../../app/src/infrastructure/mongodb.mjs', () => ({
+  db: {
+    oauthAccessTokens: {
+      insertOne: (doc) =>
+        globalThis.__patInsert
+          ? globalThis.__patInsert(doc)
+          : Promise.reject(
+              new Error('export tests: __patInsert not seeded'),
+            ),
+    },
+  },
+}))
+
+vi.mock('../../../app/models/FederationExportGrant.mjs', () => ({
+  FederationExportGrant: {
+    updateOne: async (filter, update) => {
+      globalThis.__EXPORT_LEDGER = globalThis.__EXPORT_LEDGER ?? []
+      const i = globalThis.__EXPORT_LEDGER.findIndex(
+        r =>
+          String(r.filter.owner) === String(filter.owner) &&
+          r.filter.projectId === filter.projectId &&
+          r.filter.homeOrigin === filter.homeOrigin,
+      )
+      if (i === -1) {
+        globalThis.__EXPORT_LEDGER.push({ filter, updates: [update] })
+      } else {
+        globalThis.__EXPORT_LEDGER[i].updates.push(update)
+      }
+      return { matchedCount: 1, modifiedCount: 1 }
+    },
+  },
+  FederationExportGrantSchema: {},
+}))
 
 vi.mock('../../../../../app/src/models/ProjectInvite.mjs', () => {
   globalThis.__INVITES = globalThis.__INVITES ?? []
@@ -395,8 +492,21 @@ function seedStore() {
   globalThis.__GRANTS.length = 0
   globalThis.__INVITES.length = 0
   globalThis.__SESSIONS.length = 0
+  // content-bridge v2 stores (per-test reset).
+  globalThis.__PROJECTS = globalThis.__PROJECTS ?? []
+  globalThis.__PROJECTS.length = 0
+  globalThis.__PAT_DOCS = []
+  globalThis.__patInsert = (doc) => {
+    globalThis.__PAT_DOCS.push(doc)
+    return Promise.resolve({
+      insertedId: `pat-id-${globalThis.__PAT_DOCS.length}`,
+    })
+  }
+  globalThis.__EXPORT_LEDGER = globalThis.__EXPORT_LEDGER ?? []
+  globalThis.__EXPORT_LEDGER.length = 0
+  Settings.federation.export.enabled = true
+  Settings.federation.export.maxExportTtlSeconds = 86400
 }
-
 // ── app + provider + fetch wrapper ────────────────────────────────────────────
 let base
 let server
@@ -926,4 +1036,153 @@ test('S2S federation off → 200 machine-readable refusal', async () => {
   const data = await res.json()
   expect(data.ok).toBe(false)
   expect(data.code).toBe('federation-off')
+})
+
+// ── content-bridge v2 (plan 09 §2): S2S export-project ─────────────────────
+
+// ── 13: export disabled (settings gate → 200 envelope + denied audit) ──────
+test('S2S export-project: export disabled → 200 machine-readable refusal', async () => {
+  Settings.federation.export.enabled = false
+  globalThis.__PROJECTS.push({ _id: 'projx-1', owner_ref: 'u-alice' })
+  const built = await buildS2sRequest('beta.example', 'export-project', {
+    projectId: 'projx-1',
+  })
+  const res = await postS2s(built)
+  expect(res.status).toBe(200)
+  const data = await res.json()
+  expect(data.ok).toBe(false)
+  expect(data.code).toBe('export-disabled')
+  expect(globalThis.__PAT_DOCS).toHaveLength(0)
+  expect(
+    globalThis.__AUDIT_ROWS.some(r => r.operation === 'federation_export_denied'),
+  ).toBe(true)
+})
+
+// ── 14: export happy path (consent dance → fresh PAT + sha256 ledger) ──────
+test('S2S export-project: happy path → fresh PAT, sha256-persisted, ledger row', async () => {
+  // B-side consent dance first: the grant lands under
+  // (accountId: 'u-alice', client: beta.example) — the export user
+  // binding is THAT consent grant (09 §2.1), not the S2S assertion.
+  const res0 = await runAuthorize()
+  const dance = await driveDance(res0.location)
+  expect(dance.code).toBeTruthy()
+  void dance.state
+
+  globalThis.__PROJECTS.push({ _id: 'projx-1', owner_ref: 'u-alice' })
+  const nowSec = Math.floor(Date.now() / 1000)
+  const built = await buildS2sRequest('beta.example', 'export-project', {
+    projectId: 'projx-1',
+    expiresAt: nowSec + 3600,
+  })
+  const res = await postS2s(built)
+  expect(res.status).toBe(200)
+  const data = await res.json()
+  expect(data.ok).toBe(true)
+  // snake_case response (SESSION 11 LOCKED) + git-bridge mount URL.
+  expect(data.payload.git_url).toBe('https://beta.example/git/projx-1')
+  expect(data.payload.pat).toMatch(/^olp_[A-Za-z0-9]{36}$/)
+  // TTL = min(request 3600, grant remaining ~30d, max 86400) = 3600.
+  expect(Math.abs(data.payload.expires_at - (nowSec + 3600))).toBeLessThanOrEqual(5)
+
+  // The raw PAT is NEVER persisted: sha256 + prefix only (09 §3).
+  const patDoc = globalThis.__PAT_DOCS[0]
+  expect(patDoc).toBeTruthy()
+  expect(patDoc.accessToken).toBe(
+    crypto.createHash('sha256').update(data.payload.pat).digest('hex'),
+  )
+  expect(JSON.stringify(patDoc)).not.toContain(data.payload.pat)
+  expect(patDoc.accessTokenPartial).toBe(data.payload.pat.substring(0, 8))
+  expect(patDoc.scope).toBe('federation:git_bridge')
+  expect(patDoc.user_id).toBe('u-alice')
+
+  // Ledger upsert (09 §3.1) + granted audit row.
+  expect(globalThis.__EXPORT_LEDGER).toHaveLength(1)
+  const [ledger] = globalThis.__EXPORT_LEDGER
+  expect(String(ledger.filter.owner)).toBe('u-alice')
+  expect(ledger.filter.projectId).toBe('projx-1')
+  expect(ledger.filter.homeOrigin).toBe('beta.example')
+  expect(ledger.updates[0].$set.status).toBe('exported')
+  expect(globalThis.__PAT_DOCS).toHaveLength(1)
+  expect(
+    globalThis.__AUDIT_ROWS.some(r => r.operation === 'federation_export_granted'),
+  ).toBe(true)
+})
+
+// ── 15: export idempotent re-export (fresh PAT, ledger refreshed in-place) ──
+test('S2S export-project: idempotent re-export → fresh raw PAT, one ledger row', async () => {
+  const res0 = await runAuthorize()
+  await driveDance(res0.location)
+  globalThis.__PROJECTS.push({ _id: 'projx-1', owner_ref: 'u-alice' })
+
+  const built1 = await buildS2sRequest('beta.example', 'export-project', {
+    projectId: 'projx-1',
+  })
+  const res1 = await postS2s(built1)
+  expect(res1.status).toBe(200)
+  const data1 = await res1.json()
+  expect(data1.ok).toBe(true)
+
+  const built2 = await buildS2sRequest('beta.example', 'export-project', {
+    projectId: 'projx-1',
+  })
+  const res2 = await postS2s(built2)
+  expect(res2.status).toBe(200)
+  const data2 = await res2.json()
+  expect(data2.ok).toBe(true)
+
+  // Fresh raw PAT per receipt (idempotency is on the ledger row, NOT the
+  // token — a replayed raw value is detectable + revocable).
+  expect(data2.payload.pat).not.toBe(data1.payload.pat)
+  expect(globalThis.__PAT_DOCS).toHaveLength(2)
+  // Ledger row upserted in-place, not duplicated.
+  expect(globalThis.__EXPORT_LEDGER).toHaveLength(1)
+  expect(globalThis.__EXPORT_LEDGER[0].updates).toHaveLength(2)
+  // Latest audit rows: granted both times.
+  expect(
+    globalThis.__AUDIT_ROWS.filter(
+      r => r.operation === 'federation_export_granted',
+    ).length,
+  ).toBe(2)
+})
+
+// ── 16: export without live consent (owner has no grant) ────────────────────
+test('S2S export-project: no live consent → export-no-consent (no mint)', async () => {
+  // owner-1 is B-native (not suspended, no mirror subdoc) but has NO
+  // consent grant to the beta.example client → refusal, no PAT mint.
+  globalThis.__PROJECTS.push({ _id: 'projx-9', owner_ref: 'owner-1' })
+  const built = await buildS2sRequest('beta.example', 'export-project', {
+    projectId: 'projx-9',
+  })
+  const res = await postS2s(built)
+  expect(res.status).toBe(200)
+  const data = await res.json()
+  expect(data.ok).toBe(false)
+  expect(data.code).toBe('export-no-consent')
+  expect(globalThis.__PAT_DOCS).toHaveLength(0)
+  expect(
+    globalThis.__AUDIT_ROWS.some(r => r.operation === 'federation_export_denied'),
+  ).toBe(true)
+})
+
+// ── 17: export rate limit (budget 10 / 120s per (caller, project)) ──────────
+test('S2S export-project: rate limit → 429 + Allow-Retry-After on the 11th', async () => {
+  globalThis.__PROJECTS.push({ _id: 'projx-1', owner_ref: 'u-alice' })
+  const results = []
+  let last
+  for (let i = 0; i < 11; i += 1) {
+    const built = await buildS2sRequest('beta.example', 'export-project', {
+      projectId: 'projx-1',
+    })
+    const res = await postS2s(built)
+    results.push(res.status)
+    if (res.status === 429) last = res
+  }
+  // budget 10 (plan 09 §2): the 11th delivery on the same (caller, project)
+  // key is refused with 429 (NOT an in-band envelope — rate-limit stays at
+  // the ⑤ layer, 03 §5).
+  expect(results.indexOf(429)).toBe(10)
+  const data = await last.json()
+  expect(data.ok).toBe(false)
+  expect(data.code).toBe('rate-limited')
+  expect(last.headers.get('Allow-Retry-After')).toBeTruthy()
 })

@@ -30,6 +30,13 @@ export const S2S_ERRORS = {
   INVITEE_UNKNOWN: 'invitee-unknown',
   INVITEE_DISABLED: 'invitee-disabled',
   RATE_LIMITED: 'rate-limited',
+  // Content bridge v2 (plan 09 §2). Business refusions (200 + in-band
+  // envelope, LOCKED §1 — NOT 401; "401" in plan 09 is code-taxonomy
+  // shorthand). Peer-level refusions above (peer-not-approved / peer-
+  // unknown) are pre-existing router-layer (S2sRouter ③).
+  EXPORT_DISABLED: 'export-disabled',
+  EXPORT_NO_CONSENT: 'export-no-consent',
+  PROJECT_NOT_OWNED: 'project-not-owned',
 }
 import { decodeProtectedHeader } from 'jose'
 import { verifyClientAssertion } from '@oidfed/core'

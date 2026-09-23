@@ -38,13 +38,15 @@ import { checkRateLimit } from '../util/RateLimitStore.mjs'
 import authorizeInvite from './actions/authorizeInvite.mjs'
 import invited from './actions/invited.mjs'
 import revoke from './actions/revoke.mjs'
+import exportProjectAction from './actions/exportProject.mjs'
 
-// 03 §4: the three actions. (No `federate` action — trust is admin pin,
-// 03 §7; no key-rotation S2S.)
+// 03 §4: the three actions + content-bridge v2 (plan 09 §2) `export-project`.
+// (No `federate` action — trust is admin pin, 03 §7; no key-rotation S2S.)
 const ACTIONS = {
   'authorize-invite': authorizeInvite,
   invited,
   revoke,
+  'export-project': exportProjectAction,
 }
 
 async function handleS2sRequest(req, res) {
@@ -131,6 +133,8 @@ async function handleS2sRequest(req, res) {
 
     // ⑤ rate limit (03 §5): keyed (caller origin[, invitee localNameHash])
     //    — the hash is salted (util/Anchor); raw claims never hit Redis.
+    //    `export-project` (plan 09) is keyed (caller origin, B-local
+    //    project id — a B-side identifier, safe in a Redis key).
     const invitee = body.payload?.invitee
     let localNameHash
     if (
@@ -140,10 +144,15 @@ async function handleS2sRequest(req, res) {
     ) {
       localNameHash = saltedLocalNameHash(invitee.localName, invitee.origin)
     }
+    const exportProjectId =
+      action === 'export-project' && typeof body.payload?.projectId === 'string'
+        ? body.payload.projectId
+        : null
     const limited = await checkRateLimit(null, {
       action,
       callerOrigin: from,
       localNameHash,
+      projectId: exportProjectId,
     })
     if (!limited.allowed) {
       return res
@@ -189,6 +198,23 @@ async function handleS2sRequest(req, res) {
         meta: {
           origin: from,
           direction: 'inbound',
+          assertion: assertionMetaObj,
+        },
+        req,
+      })
+    } else if (action === 'export-project') {
+      // content-bridge v2 (plan 09 §3): projectId = the B-local project
+      //   _id (a valid ObjectId here — unlike S2S receipts which pass
+      //   null). Redacted: `scope` constant ONLY — the PAT value, its
+      //   length, and its expiry never land in meta (HANDOFF S11).
+      await audit({
+        operation: result.ok
+          ? AUDIT_TYPES.exportGranted
+          : AUDIT_TYPES.exportDenied,
+        projectId: body.payload?.projectId ?? null,
+        meta: {
+          origin: from,
+          scope: 'federation:git_bridge',
           assertion: assertionMetaObj,
         },
         req,

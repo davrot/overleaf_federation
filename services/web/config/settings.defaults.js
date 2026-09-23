@@ -1238,6 +1238,15 @@ module.exports = {
     s2sFetchTimeoutMs: 10000, // S2S outbound (invite + admin revoke)
     tokenFetchTimeoutMs: 30000, // code-exchange token POST covers B's full OIDC dance
     jwksFetchTimeoutMs: 5000, // JWKS blob (small JSON) is fetched before id_token verify
+    // Content-bridge v2 (plan 09 §5). A and B each set their OWN
+    // `export.enabled` separately: B gates RECEIVING `export-project` S2S;
+    // A needs nothing (its wizard is per-user auth'd). `maxExportTtlSeconds`
+    // is a HARD cap: request TTL = min(request, grant remaining, this).
+    // `sweepOnRevoke` (2c) gates §3 sweep (default true; off = v1 NO-OP).
+    export: {
+      enabled: false, // B-side: allow export-project S2S
+      maxExportTtlSeconds: 86400, // cap for payload.expiresAt
+    },
   },
 
   csp: {

@@ -22,6 +22,8 @@ export const db = {
   docs: internalDb.collection('docs'),
   domainVerifications: internalDb.collection('domainVerifications'),
   feedbacks: internalDb.collection('feedbacks'),
+  federationExportGrants: internalDb.collection('federationExportGrants'),
+  federationTrustAnchors: internalDb.collection('federationTrustAnchors'),
   githubSyncEntityVersions: internalDb.collection('githubSyncEntityVersions'),
   githubSyncProjectStates: internalDb.collection('githubSyncProjectStates'),
   githubSyncUserCredentials: internalDb.collection('githubSyncUserCredentials'),
