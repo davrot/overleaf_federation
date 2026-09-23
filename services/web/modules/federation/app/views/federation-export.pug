@@ -1,0 +1,48 @@
+doctype html
+html(lang=en)
+	head
+		meta(charset='utf-8')
+		meta(name='federation' content='federation-export')
+		title Federation export — #{siteName || 'Overleaf'}
+		meta(name='fed-csrf' content=csrfToken)
+		style
+			| body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; background: #f6f7f9; color: #232629; margin: 0; padding: 24px; }
+			| h1 { font-size: 1.5rem; margin: 0 0 4px; }
+			| .sub { color: #6a7481; margin: 0 0 24px; font-size: 0.9rem; }
+			| section { background: #fff; border: 1px solid #e1e6ea; border-radius: 8px; padding: 18px 20px; margin-bottom: 20px; }
+			| h2 { font-size: 1.08rem; margin: 0 0 4px; }
+			| label { display: block; margin: 14px 0 4px; font-size: 0.9rem; }
+			| select, input { padding: 6px 8px; border: 1px solid #d1d7dd; border-radius: 5px; font-size: 0.9rem; width: 100%; box-sizing: border-box; }
+			| button { margin-top: 14px; padding: 6px 14px; font-size: 0.9rem; border: none; border-radius: 5px; background: #0d56ed; color: #fff; cursor: pointer; }
+			| .hint { color: #6a7481; font-size: 0.8rem; margin: 0 0 4px; font-family: ui-monospace, monospace; }
+			| .err { color: #b3403b; font-size: 0.9rem; margin: 12px 0 0; }
+	body
+		h1 Federation export
+		p.sub Pull a project from a partner instance into a local clone (content bridge v2).
+		if error
+			p.err= error
+		section
+			h2 Export a project
+			form(method='POST' action='/federation/export')
+				input(type='hidden' name='_csrf' value=csrfToken)
+				- var form = (locals.form ? locals.form : {}) || {}
+				- var peerList = (peers && peers.length) ? peers : []
+				label Export from peer (B)
+				select(name='origin')
+					if peerList.length === 0
+						option(value='0') (no approved outbound peers — pin one in /admin/federation)
+					else
+						each peer in peerList
+							option(value=peer.origin selected=(form.origin === peer.origin))= peer.origin
+				label B-side project id
+				- var pidVal = form.projectId || ''
+				- var pidPh = 'paste the B-side project id'
+				input(type='text' name='projectId' value=pidVal placeholder=pidPh required)
+				p.hint The id from the B-side URL (the /project/id segment). The B-side owner is bound by their live consent grant.
+				- var ttlLabel = 'Optional TTL in seconds (default ' + defaultTtlSeconds + ', max ' + maxTtlSeconds + ')'
+				label= ttlLabel
+				- var ttlVal = (form.expiresAt === undefined || form.expiresAt === null || form.expiresAt === '') ? '' : form.expiresAt
+				input(type='number' name='expiresAt' min='1' max=maxTtlSeconds value=ttlVal placeholder=defaultTtlSeconds)
+				button(type='submit') Export
+		p.sub
+			| Export writes a redacted audit row (federation_export_requested) and asks the peer to mint a short-lived, single-project PAT (scope federation:git_bridge). The PAT is shown once on the result page and never persists on this instance.

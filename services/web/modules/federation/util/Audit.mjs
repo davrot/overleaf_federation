@@ -52,6 +52,12 @@ const META_FIELDS = [
   // content-bridge v2 (plan 09 §3): the scope marker on export audits
   // (the string 'federation:git_bridge' — a constant, never a secret).
   'scope',
+  // 2b success audit (plan 09 §3.2: "audit { gitUrl and expiry if
+  // successful }" — the git URL is a host+id, the expiry is a
+  // timestamp: neither is a secret; the PAT value is and is NEVER
+  // here).
+  'gitUrl',
+  'expiresAt',
 ]
 
 function filterMeta(meta) {
@@ -120,4 +126,7 @@ export const AUDIT_TYPES = {
   // content-bridge v2 (plan 09 §3)
   exportGranted: 'federation_export_granted',
   exportDenied: 'federation_export_denied',
+  // 2b: A-side wizard audit (plan 09 §3.2 — meta { origin, scope } +
+  // reason; NEVER the PAT, git_url, or expiry — those are B-side facts).
+  exportRequested: 'federation_export_requested',
 }

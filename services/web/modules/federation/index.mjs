@@ -38,6 +38,7 @@ import { getOidcProvider } from './oidc/createProvider.mjs'
 import CallbackRouter from './rp/CallbackRouter.mjs'
 import { leafHandler } from './oidf/leaf.mjs'
 import FederatedInviteRouter from './invite/FederatedInviteRouter.mjs'
+import FederatedExportRouter from './invite/FederatedExportRouter.mjs'
 import FederatedAdminRouter from './admin/AdminRouter.mjs'
 import {
   ensureBootstrapped,
@@ -90,6 +91,11 @@ export default {
 
       // ④ A-side invite endpoints (preview + authorize, plan 07 §P1).
       FederatedInviteRouter.apply(webRouter)
+
+      // ④b A-side export wizard (content-bridge 2b, plan 09 §4.1):
+      //      GET/POST /federation/export (form → S2S export-project →
+      //      result view with the PAT rendered in-HTML).
+      FederatedExportRouter.apply(webRouter)
 
       // ⑤ Admin routes (PEER pin/approve/deny/revoke, key rotate, audit).
       FederatedAdminRouter.apply(webRouter)

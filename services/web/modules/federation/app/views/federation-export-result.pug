@@ -1,0 +1,44 @@
+doctype html
+html(lang=en)
+	head
+		meta(charset='utf-8')
+		meta(name='federation' content='federation-export')
+		title Federation export — #{siteName || 'Overleaf'}
+		style
+			| body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; background: #f6f7f9; color: #232629; margin: 0; padding: 24px; }
+			| h1 { font-size: 1.5rem; margin: 0 0 4px; }
+			| .sub { color: #6a7481; margin: 0 0 16px; font-size: 0.9rem; }
+			| section { background: #fff; border: 1px solid #e1e6ea; border-radius: 8px; padding: 18px 20px; margin-bottom: 20px; }
+			| h2 { font-size: 1.08rem; margin: 0 0 4px; }
+			| code, pre { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+			| pre { background: #f6f7f9; border: 1px solid #e1e6ea; border-radius: 5px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all; }
+			| .hint { color: #6a7481; font-size: 0.85rem; margin: 0 0 4px; }
+			| .warn { color: #93600d; font-size: 0.9rem; }
+			| table { border-collapse: collapse; font-size: 0.9rem; }
+			| td { padding: 4px 10px 4px 0; vertical-align: top; }
+	body
+		h1 Federation export
+		p.sub The peer minted a short-lived PAT for the project you asked for.
+		section
+			h2 Export result
+			table
+				tr
+					td Peer (B)
+					td= project.origin
+				tr
+					td B-side project id
+					td= project.projectId
+				tr
+					td PAT scope
+					td= project.scope
+				tr
+					td Expires at
+					td= project.expiresAt
+			p.warn Copy the PAT below now — this page is rendered once, the PAT is not persisted here, and it stops working at the expiry above.
+		section
+			h2 Clone command
+			p.hint The PAT is embedded as the Basic-auth password (git-bridge's smart-HTTP layer validates it with B's /oauth/token/info, SHA-256 lookup + expiry — 2a mint). For curl to the REST snapshots endpoint, use "Authorization: Bearer <PAT>" instead.
+			pre #{project.cloneCommand}
+		section
+			h2 Audit
+			p.hint This wizard wrote a redacted audit row (federation_export_requested / federation_export_denied) carrying the peer origin + scope only. The PAT value, the git URL and the expiry are not in the audit.
