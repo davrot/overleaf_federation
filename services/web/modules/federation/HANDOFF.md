@@ -22,7 +22,7 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 | P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit + institutional TA (P3 pin-time) | **DONE** (rate-limit, audit, admin, claim allow-list via `Redact.CLAIM_LOG_ALLOWLIST`, institutional TA pin-time all shipped + committed) |
 | P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
 | P2-live | Live smoke against real Mongo+Redis+oidc-provider+express (the module, not the mocks) | **DONE** (13 scenarios ALL PASS — see SESSION 10; `tools/live-smoke.mjs`) |
-| **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **IN PROGRESS** (**2a SHIPPED** — SESSION 12; **2b SHIPPED** — SESSION 13; **2c SHIPPED** — SESSION 14; 2d next) |
+| **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **IN PROGRESS** (**2a SHIPPED** — SESSION 12; **2b SHIPPED** — SESSION 13; **2c SHIPPED** — SESSION 14; **2d IN PROGRESS** — this section, bottom of file) |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -255,6 +255,75 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 - Do NOT use `webRouter.use()` for leaf (must be `app.use('/')` for well-known)
 
 ## 9. Progress Log
+
+### IN FLIGHT: content-bridge 2d (TODO-0c6f534f) — 2-real-origins live smoke, SESSION 15
+Goal step 4 of 4 (goal `3dad1c9e`). 2a/2b/2c all committed + pushed
+(`86ead6eb49`/`a56cafbae2`/`1b7a9d4634`/`01ccd0c2b7`/`3e0b5f4ae2`/
+`66d87b3372`). This is the LAST unblocked work item; eduGAIN phases
+0/2/3 stay external-infra-blocked (plan/10, unchanged).
+
+**Architecture (recon CLOSED this session, verified against shipped
+code — do not re-read unless a seam changes):**
+- **Cross-origin flow is the v1 identity dance on A (RP), NOT the
+  wizard, that binds the export.** B's `export-project` (2a)
+  binds owner-B-native + a LIVE consent grant to home A's client
+  (`federationClientId(callerOrigin)`, via the adapter account index
+  `federation:oidc:client:<accountId>` → grantId). So the 2d order:
+  1. A user (viewer) authorizes a federated invite anchored to a
+     B-origin owner email → A RP dance (login + consent) at B's OP →
+     mirror user + consent grant land at B.
+  2. Viewer on A hits the export wizard with B's project id → S2S
+     `export-project` → B mints the PAT (2a) → wizard result view.
+  3. Live PAT checks against B's git-bridge REST surface:
+     `GET /api/v0/docs/<id>` (read → 200) and
+     `POST /api/v0/docs/<id>/snapshots` (write → **403**, the 2c
+     guard) — Bearer header, the surface this repo deploys.
+- **One OP per process (single-origin variant ×2).**
+  `createProvider` is a module-level singleton keyed on
+  `Settings.siteUrl` + shared Mongo (`FederationKey` unique on
+  `(purpose, kid)`); two providers in one process = one origin. So
+  TWO node processes: `live-smoke-a.mjs` (origin A,
+  `alpha.example`) + `live-smoke-b.mjs` (origin B, `beta.example`),
+  shared real Mongo + Redis (docker `fed-smoke-mongo` 27107 /
+  `fed-smoke-redis` 6380). A process: only v1 mount
+  (S2sRouter + bridge + callback + oidc mount). B process: v1 mount
+  + `GitBridgeRouter` (its `apply(webRouter, privateApiRouter,
+  publicApiRouter)` takes three routers — drive the PAT check
+  middleware directly, no Go service needed).
+- **Key pinning (02 §3 TOFU):** the keystore is per-origin Mongo
+  state; cross-origin S2S needs B to pin A's federation
+  key. Reuse the v1 single-flow: A admin approves B peer
+  (auto-pins B's federation public key into A's
+  `FederationPeer.anchorJwks`) AND B admin approves A peer
+  (pinned into B). Both approval paths exercised in
+  `FederationAdminController` (unit-tested); live: one process
+  admin-approves the other via a small HTTP surface on the admin
+  router OR driver-side direct `buildS2sRequest` approval (pick the
+  simpler that exercises the real peer-approval wire).
+- **PAT mint is the same `db.oauthAccessTokens`
+  (scope `federation:git_bridge`) the 2c guard refuses on the
+  write path.** `validatePersonalAccessToken` (GET
+  `/oauth/token/info`) only checks raw-PAT existence (no scope) —
+  so the live 403 is `ensureTokenProjectAccess('write')`
+  (GitBridgeAuthMiddleware) on the snapshot POST. `getUserId`
+  filters `expiresAt: { $gt: now }` (2a TTL enforcement already
+  verified live).
+- **Shared Mongo:** A and B share one DB (both processes' mongoose
+  connects to the same string). Seeded once by the driver: User rows
+  (alice@beta.example owner-B-native + a viewer on A),
+  `Project` (owner_ref=alice, B-side), FederationPeer rows both
+  directions. Redis keys are namespaced by the modules in play
+  (oidc-provider adapter `federation:oidc:*` per-provider-prefix
+  — both providers use the same Redis, verify key isolation: the
+  adapter prefixes are `federation:oidc:*` (SHARED across providers
+  in the v1 single-process test — for 2d each op uses its own
+  client-set but the shared prefix is fine because A's OP serves
+  A's client_id, B's OP serves B's, and client_id embeds the
+  origin so no cross-talk).
+- **Anti-loop:** this file documents the flow — the next
+  continuation implements the two live-smoke scripts + driver
+  without re-reading the wire code (S2sRouter/verifying/oidf
+  keystore are already proven in SESSION 10).
 
 ### [SESSION 10] 2026-09-22 — Live smoke (goal 1ec14289) CLOSED: module proven live, 2 prod bugs caught
 - **`tools/live-smoke.mjs`** (NEW, committed): the two-instance scenario matrix 1:1, but the stub layer is the REAL runtime — real Mongo (all 5 models: FederationKey/Peer, User, ProjectInvite, ProjectAuditLogEntry), real Redis (PKCE state, jti dedup, JWKS cache, rate limits + oidc-provider RedisOidcProviderAdapter Session/Interaction/AuthorizationCode/Grant docs + client SET), real express listen, real oidc-provider v9 dance, real jose. Stubs: ONLY the 4 documented app seams (CollaboratorsGetter ×2, CollaboratorsHandler ×1, UserSessionsManager ×1). Single origin `beta.example` plays both A (RP) and B (OP) one process; `globalThis.fetch` rewrite `https://beta.example` → local port.
