@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import logger from '@overleaf/logger'
 import { db } from '../../../../../app/src/infrastructure/mongodb.mjs'
 import { clearConfigCache } from '../../../ssoConfigLoader.mjs'
+import { evaluateAttrFilter, sanitizeAttrFilter } from '../../../../../app/src/Features/Authentication/ssoRoleEvaluator.mjs'
 
 const __dirname = Path.dirname(fileURLToPath(import.meta.url))
 
@@ -273,6 +274,32 @@ const SSOAdminController = {
     }
   },
 
+  async testAttrFilter(req, res) {
+    const { attribute, testValue } = req.body || {}
+    if (!attribute) {
+      return res.json({ success: false, message: 'attribute is required' })
+    }
+    const attrFilter =
+      req.body?.attrFilter != null ? req.body.attrFilter : undefined
+    // In-memory evaluation only: profile carries just the attr under test.
+    // Rows for other attrs can't match (no profile key); the evaluated role
+    // + row index tell the admin which rule a sample value would hit.
+    let evaluated
+    try {
+      evaluated = evaluateAttrFilter(sanitizeAttrFilter(attrFilter), {
+        [attribute]: testValue,
+      })
+    } catch (e) {
+      return res.json({ success: false, message: `Invalid filter: ${e.message}` })
+    }
+    return res.json({
+      success: true,
+      matchedRole: evaluated.role,
+      matchedRow: evaluated.filterId != null ? evaluated.filterId + 1 : null,
+      matchedAttribute: evaluated.reason?.attribute || null,
+    })
+  },
+
   async testProvider(req, res) {
     try {
       const { providerId } = req.params
@@ -480,7 +507,12 @@ function _sanitizeConfig(newConfig, existing) {
           }
         }
       }
-      return p
+       if (p.attrFilter != null) {
+          const cleaned = sanitizeAttrFilter(p.attrFilter)
+          if (cleaned) p.attrFilter = cleaned
+          else delete p.attrFilter
+        }
+        return p
     })
   }
   return config

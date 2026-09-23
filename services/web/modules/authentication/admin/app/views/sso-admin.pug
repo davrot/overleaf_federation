@@ -387,6 +387,27 @@ block content
 						.form-check
 							input.form-check-input.provider-field(type='checkbox' data-field='updateUserDetailsOnLogin')
 							label.form-check-label Update user details on each login
+
+				//- Role Filters (attrFilter) — first matching row wins
+				h6.text-primary.border-bottom.pb-2.mb-3.mt-3
+					i.fa.fa-filter.me-1
+					|  Role Filters (first match wins)
+				.small.text-muted.mb-2
+					| Checked top-to-bottom against the attributes the provider releases — first matching row wins; no match = local (may create own projects). guest = login OK, cannot create own projects. blocked = login refused.
+				.attr-filter-rows.d-flex.flex-column(style='gap:0.4rem;')
+				.row.mb-3
+					.col-md-4
+						button.btn.btn-outline-primary.attr-filter-add(type='button') Add filter row
+					.col-md-8
+						span.attr-filter-test-result.text-muted
+				.row.mb-3
+					.col-md-6
+						label.form-label Test attribute
+						input.form-control.attr-ff-test-attribute(type='text' placeholder='e.g. entitlements')
+					.col-md-6
+						label.form-label Test value
+						input.form-control.attr-ff-test-value(type='text' placeholder='sample released value')
+						button.btn.btn-sm.btn-outline-secondary.mt-1.attr-filter-test(type='button') Test filter
 				
 				.test-result.mt-2
 
@@ -562,6 +583,27 @@ block content
 						.form-check.mt-4
 							input.form-check-input.provider-field(type='checkbox' data-field='updateUserDetailsOnLogin')
 							label.form-check-label Update details on login
+
+				//- Role Filters (attrFilter) — first matching row wins
+				h6.text-primary.border-bottom.pb-2.mb-3.mt-3
+					i.fa.fa-filter.me-1
+					|  Role Filters (first match wins)
+				.small.text-muted.mb-2
+					| Checked top-to-bottom against the attributes the provider releases — first matching row wins; no match = local (may create own projects). guest = login OK, cannot create own projects. blocked = login refused.
+				.attr-filter-rows.d-flex.flex-column(style='gap:0.4rem;')
+				.row.mb-3
+					.col-md-4
+						button.btn.btn-outline-primary.attr-filter-add(type='button') Add filter row
+					.col-md-8
+						span.attr-filter-test-result.text-muted
+				.row.mb-3
+					.col-md-6
+						label.form-label Test attribute
+						input.form-control.attr-ff-test-attribute(type='text' placeholder='e.g. entitlements')
+					.col-md-6
+						label.form-label Test value
+						input.form-control.attr-ff-test-value(type='text' placeholder='sample released value')
+						button.btn.btn-sm.btn-outline-secondary.mt-1.attr-filter-test(type='button') Test filter
 				
 				.test-result.mt-2
 
@@ -716,6 +758,7 @@ block content
 					}
 				});
 				data.enabled = card.querySelector('.provider-enabled').checked;
+					data.attrFilter = collectAttrFilterRows(card)
 				data.name = card.querySelector('.provider-field[data-field="name"]').value;
 				data.order = index;
 				providers.push(data);
@@ -763,6 +806,16 @@ block content
 				
 				// Test button
 				card.querySelector('.btn-test').addEventListener('click', () => testProvider(provider.id, card));
+				
+
+				// attrFilter row editor (P1c)
+				renderAttrFilterRows(card, provider.attrFilter)
+				card.querySelector('.attr-filter-add').addEventListener('click', () => {
+					card.querySelector('.attr-filter-rows').appendChild(buildAttrFilterRow())
+				})
+				card.querySelector('.attr-filter-test').addEventListener('click', () => {
+					testAttrFilterRow(card)
+				})
 				
 				// Delete button
 				card.querySelector('.btn-delete').addEventListener('click', () => {
@@ -812,6 +865,60 @@ block content
 			});
 		}
 
+
+		// --- attrFilter row editor (P1c) — first matching row wins ---
+		function buildAttrFilterRow(row) {
+			if (typeof row === "undefined") row = {}
+			const rowEl = document.createElement("div")
+			rowEl.className = 'attr-filter-row d-flex gap-2 align-items-center flex-wrap'
+			rowEl.innerHTML = '<select class="form-select form-select-sm attr-ff-role"><option value="local">local</option><option value="guest">guest</option><option value="blocked">blocked</option></select><input type="text" class="form-control form-control-sm attr-ff-attribute" placeholder="attribute / claim name"><input type="text" class="form-control form-control-sm attr-ff-values" placeholder="v1, v2"><select class="form-select form-select-sm attr-ff-match"><option value="equals">equals</option><option value="includes">includes</option><option value="regex">regex</option></select><div class="form-check"><input type="checkbox" class="form-check-input attr-ff-case"><label class="form-check-label small">case-sensitive</label></div><button type="button" class="btn btn-sm btn-outline-danger attr-ff-remove">Remove</button>'
+			rowEl.querySelector('.attr-ff-role').value = row.role || 'local'
+			rowEl.querySelector('.attr-ff-attribute').value = row.attribute || ''
+			rowEl.querySelector('.attr-ff-values').value = Array.isArray(row.values) ? row.values.join(', ') : (row.values ? String(row.values) : '')
+			rowEl.querySelector('.attr-ff-match').value = row.match || 'equals'
+			rowEl.querySelector('.attr-ff-case').checked = row.caseSensitive !== false
+			rowEl.querySelector('.attr-ff-remove').addEventListener('click', () => rowEl.remove())
+			return rowEl
+		}
+
+		function renderAttrFilterRows(card, rows) {
+			const container = card.querySelector('.attr-filter-rows')
+			container.innerHTML = " "
+			rows.forEach((row) => container.appendChild(buildAttrFilterRow(row)))
+		}
+
+		function collectAttrFilterRows(card) {
+			const rows = []
+			card.querySelectorAll('.attr-filter-row').forEach(r => {
+				const attribute = r.querySelector('.attr-ff-attribute').value.trim()
+				if (!attribute) return
+				rows.push({
+					role: r.querySelector('.attr-ff-role').value,
+					attribute,
+					values: r.querySelector('.attr-ff-values').value.split(',').map(v => v.trim()).filter(Boolean),
+					match: r.querySelector('.attr-ff-match').value,
+					caseSensitive: r.querySelector('.attr-ff-case').checked,
+				})
+			})
+			return rows
+		}
+
+		async function testAttrFilterRow(card) {
+			const resultEl = card.querySelector('.attr-filter-test-result')
+			const attribute = card.querySelector('.attr-ff-test-attribute').value.trim()
+			if (!attribute) {
+				resultEl.textContent = 'Enter a test attribute first.'
+				return
+			}
+			const testValue = card.querySelector('.attr-ff-test-value').value
+			try {
+				const res = await ssoFetch('/admin/sso/test/attr-filter', { method: 'POST', body: { attribute, testValue, attrFilter: collectAttrFilterRows(card) } })
+				const data = await res.json()
+				resultEl.textContent = data.success ? ('role: ' + data.matchedRole + (data.matchedRow ? ' (matched rule ' + data.matchedRow + ')' : ' (default)')) : (data.message || 'Test failed')
+			} catch (err) {
+				resultEl.textContent = 'Error: ' + err.message
+			}
+		}
 		async function saveConfig() {
 			const config = gatherConfig();
 			config._csrf = csrfToken;

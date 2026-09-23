@@ -130,6 +130,11 @@ const AuthenticationManager = {
     const update = { $inc: { loginEpoch: 1 } }
     if (!match) {
       update.$set = { lastFailedLogin: new Date() }
+    } else {
+      // P1c (plan 10 §0.8): a password login is never an SSO-login, so clear the
+      // current-SSO-login marker; the guest-create refusal keyed on
+      // ssoRoles[ssoLoginProviderId] then treats this session as 'local'.
+      update.$unset = { ssoLoginProviderId: '' }
     }
 
     const result = await User.updateOne(

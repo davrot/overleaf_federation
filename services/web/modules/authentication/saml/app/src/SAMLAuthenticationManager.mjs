@@ -20,7 +20,7 @@ const SAMLAuthenticationManager = {
    * @param {object} auditLog
    * @param {object} opts.providerId  provider row id (DB) or env legacy id '1'
    */
-  async findOrCreateUser(profile, auditLog, { providerId } = {}) {
+  async findOrCreateUser(profile, auditLog, { providerId, ssoRole } = {}) {
     const provider = await getProviderById(providerId)
     const isDbProvider = !!(provider && !provider.__envFallback)
     const samlProviderId = isDbProvider ? providerId : '1'
@@ -88,12 +88,21 @@ const SAMLAuthenticationManager = {
         }
       ).exec()
     }
-// We only want to update the user if the user is a SAML user
+    // We only want to update the user if the user is a SAML user
     let userDetails = updateUserDetailsOnLogin ? { first_name : firstName, last_name: lastName } : {}
     if (attAdmin && valAdmin) {
       user.isAdmin = isAdmin
       userDetails.isAdmin = isAdmin
     }
+    // P1c: persist the role the controller evaluated from attrFilter (before user
+    // lookup creates nothing here for a `blocked` user) + the current-SSO-login
+    // marker used by the project-creation refusal check. Re-evaluated every
+    // login (G4). Keyed on samlProviderId (env '1' / DB row id).
+    userDetails['ssoRoles.' + samlProviderId] = {
+      role: ssoRole || 'local',
+      at: Date.now(),
+    }
+    userDetails.ssoLoginProviderId = samlProviderId
     const result = await User.updateOne(
       { _id: user._id, loginEpoch: user.loginEpoch },
       {

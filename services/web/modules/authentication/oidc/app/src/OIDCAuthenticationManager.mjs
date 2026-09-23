@@ -12,7 +12,7 @@ const OIDCAuthenticationManager = {
    * @param {object} auditLog
    * @param {object} opts.providerId  provider row id (DB) or env synthetic id
    */
-  async findOrCreateUser(profile, auditLog, { providerId } = {}) {
+  async findOrCreateUser(profile, auditLog, { providerId, ssoRole } = {}) {
     const provider = await getProviderById(providerId)
     const envCfg = Settings.oidc
     const isDbProvider = provider && !provider.__envFallback
@@ -101,6 +101,14 @@ const OIDCAuthenticationManager = {
       user.isAdmin = isAdmin
       userDetails.isAdmin = isAdmin
     }
+    // P1c: persist the role the controller evaluated from attrFilter (blocked users
+    // never reach here) + the current-SSO-login marker (G4: re-eval each login),
+    // keyed on the login providerId.
+    userDetails['ssoRoles.' + providerId] = {
+      role: ssoRole || 'local',
+      at: Date.now(),
+    }
+    userDetails.ssoLoginProviderId = providerId
     const result = await User.updateOne(
       { _id: user._id, loginEpoch: user.loginEpoch }, { $inc: { loginEpoch: 1 }, $set: userDetails },
       {}

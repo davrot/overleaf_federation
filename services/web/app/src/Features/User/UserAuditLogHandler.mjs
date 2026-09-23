@@ -7,6 +7,7 @@ import Features from '../../infrastructure/Features.mjs'
 
 function _canHaveNoIpAddressId(operation, info) {
   if (operation === 'add-email' && info.script) return true
+  if (operation === 'sso-guest-create-denied') return true
   if (operation === 'join-group-subscription') return true
   if (operation === 'leave-group-subscription') return true
   if (operation === 'must-reset-password-set') return true

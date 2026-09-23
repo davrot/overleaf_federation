@@ -6,6 +6,8 @@ import UserController from '../../../../../app/src/Features/User/UserController.
 import ThirdPartyIdentityManager from '../../../../../app/src/Features/User/ThirdPartyIdentityManager.mjs'
 import OIDCAuthenticationManager from './OIDCAuthenticationManager.mjs'
 import OIDCModuleManager from './OIDCModuleManager.mjs'
+import { evaluateAttrFilter, auditSsoLoginDenied } from '../../../../../app/src/Features/Authentication/ssoRoleEvaluator.mjs'
+import { getProviderById } from '../../../ssoConfigLoader.mjs'
 
 const OIDCAuthenticationController = {
   /**
@@ -114,9 +116,32 @@ const OIDCAuthenticationController = {
       info: { method: `OIDC login - ${providerId}`, fromKnownDevice },
     }
 
+    // P1c: evaluate attrFilter and refuse `blocked` logins BEFORE account creation.
+    let role = 'local'
+    try {
+      const provider = await getProviderById(providerId)
+      if (provider && !provider.__envFallback) {
+        role = evaluateAttrFilter(provider.attrFilter, profile).role
+      }
+    } catch (err) {
+      logger.warn({ err, providerId }, 'OIDC attrFilter evaluation failed; defaulting role to local')
+    }
+    if (role === 'blocked') {
+      logger.warn({ providerId }, 'OIDC login denied: attrFilter blocked')
+      try { await auditSsoLoginDenied({ ipAddress: req.ip, providerId, reason: { method: 'oidc-attrFilter-blocked' } }) } catch (err) { logger.warn({ err }, 'failed to audit sso-login-denied (oidc)') }
+      return {
+        user: false,
+        info: {
+          type: 'error',
+          text: 'Login denied by SSO role filter',
+          status: 401,
+        },
+      }
+    }
+
     let user
     try {
-      user = await OIDCAuthenticationManager.promises.findOrCreateUser(profile, auditLog, { providerId })
+      user = await OIDCAuthenticationManager.promises.findOrCreateUser(profile, auditLog, { providerId, ssoRole: role })
     } catch (error) {
       logger.debug({ email : profile.emails[0].value }, `OIDC login failed: ${error}`)
       return {

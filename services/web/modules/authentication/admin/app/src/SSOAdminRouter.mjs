@@ -74,6 +74,12 @@ export default {
     )
 
     webRouter.post(
+      '/admin/sso/test/attr-filter',
+      AuthorizationMiddleware.ensureUserIsSiteAdmin,
+      SSOAdminController.testAttrFilter
+    )
+
+    webRouter.post(
       '/admin/sso/test/provider/:providerId',
       AuthorizationMiddleware.ensureUserIsSiteAdmin,
       SSOAdminController.testProvider

@@ -10,6 +10,9 @@ import ProjectEntityUpdateHandler from './ProjectEntityUpdateHandler.mjs'
 import ProjectDetailsHandler from './ProjectDetailsHandler.mjs'
 import HistoryManager from '../History/HistoryManager.mjs'
 import { User } from '../../models/User.mjs'
+import Errors from '../Errors/Errors.js'
+import { persistedRoleForProvider } from '../Authentication/ssoRoleEvaluator.mjs'
+import UserAuditLogHandler from '../User/UserAuditLogHandler.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { callbackify } from 'node:util'
@@ -236,6 +239,39 @@ async function _createBlankProject(
   attributes = {},
   { skipCreatingInTPDS = false } = {}
 ) {
+  // P1c (plan 10 §0.8): all "create own project" paths converge here (newProject,
+  // duplicate, upload, TPDS). Refuse `guest`/`blocked` SSO owners (role persisted
+  // at login, keyed on ssoLoginProviderId). Refuse before any side-effect (history
+  // init, metric, audit) so a denied create leaves no trace in creation telemetry.
+  const ssoOwner = await User.findById(ownerId, {
+    ssoRoles: 1,
+    ssoLoginProviderId: 1,
+  }).exec()
+  const ssoRole = persistedRoleForProvider(
+    ssoOwner?.ssoRoles,
+    ssoOwner?.ssoLoginProviderId
+  )
+  if (ssoRole === 'guest' || ssoRole === 'blocked') {
+    logger.warn(
+      { ownerId, ssoRole, ssoLoginProviderId: ssoOwner?.ssoLoginProviderId },
+      'project-creation denied: SSO attrFilter role is guest/blocked'
+    )
+    // This choke sits below the HTTP route (no req.ip), so the audit row uses
+    // a null IP — 'sso-guest-create-denied' is allowlisted for that by
+    // plan §0.8 (the refusal is still attributed to ownerId + ssoRole).
+    UserAuditLogHandler.addEntryInBackground(
+      ownerId,
+      'sso-guest-create-denied',
+      ownerId,
+      null,
+      { ssoRole, ssoLoginProviderId: ssoOwner?.ssoLoginProviderId }
+    )
+    throw new Errors.ForbiddenError(
+      'project-creation-denied',
+      { ssoGuestCreateDenied: true, ssoRole }
+    )
+  }
+
   metrics.inc('project-creation')
   const timer = new metrics.Timer('project-creation')
   await ProjectDetailsHandler.promises.validateProjectName(projectName)

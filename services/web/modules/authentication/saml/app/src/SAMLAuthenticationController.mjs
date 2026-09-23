@@ -9,6 +9,7 @@ import { handleAuthenticateErrors } from '../../../../../app/src/Features/Authen
 import { xmlResponse } from '../../../../../app/src/infrastructure/Response.mjs'
 import { readFilesContentFromEnv } from '../../../utils.mjs'
 import { getProviderById } from '../../../ssoConfigLoader.mjs'
+import { evaluateAttrFilter, auditSsoLoginDenied } from '../../../../../app/src/Features/Authentication/ssoRoleEvaluator.mjs'
 
 const SAMLAuthenticationController = {
   /**
@@ -94,15 +95,39 @@ const SAMLAuthenticationController = {
   },
   async _doPassportLogin(req, profile) {
     const { fromKnownDevice } = AuthenticationController.getAuditInfo(req)
-    const providerId = req.session.samlProviderId || Settings.saml?._firstProviderId || '1'
+    const samlProviderId = req.session.samlProviderId || Settings.saml?._firstProviderId || '1'
     const auditLog = {
       ipAddress: req.ip,
-      info: { method: `SAML login - ${providerId}`, fromKnownDevice },
+      info: { method: `SAML login - ${samlProviderId}`, fromKnownDevice },
+    }
+
+    // P1c: evaluate the per-provider attribute filter and refuse `blocked` logins
+    // BEFORE account creation (no account, no session; audit sso-login-denied).
+    let role = 'local'
+    try {
+      const provider = await getProviderById(samlProviderId)
+      if (provider && !provider.__envFallback) {
+        role = evaluateAttrFilter(provider.attrFilter, profile).role
+      }
+    } catch (err) {
+      logger.warn({ err, samlProviderId }, 'SAML attrFilter evaluation failed; defaulting role to local')
+    }
+    if (role === 'blocked') {
+      logger.warn({ samlProviderId }, 'SAML login denied: attrFilter blocked')
+      try { await auditSsoLoginDenied({ ipAddress: req.ip, providerId: samlProviderId, reason: { method: 'saml-attrFilter-blocked' } }) } catch (err) { logger.warn({ err }, 'failed to audit sso-login-denied (saml)') }
+      return {
+        user: false,
+        info: {
+          type: 'error',
+          text: 'Login denied by SSO role filter',
+          status: 401,
+        },
+      }
     }
 
     let user
     try {
-      user = await SAMLAuthenticationManager.promises.findOrCreateUser(profile, auditLog, { providerId })
+      user = await SAMLAuthenticationManager.promises.findOrCreateUser(profile, auditLog, { providerId: samlProviderId, ssoRole: role })
     } catch (error) {
       return {
         user: false,

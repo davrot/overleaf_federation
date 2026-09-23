@@ -120,6 +120,9 @@ describe('AuthenticationManager', function () {
         })
 
         it('should bump epoch', function (ctx) {
+          // P1c (plan 10 §0.8): a successful password login is never an SSO-login,
+          // so the update also clears ssoLoginProviderId (the guest-create refusal
+          // then treats the session as 'local').
           ctx.User.updateOne.should.have.been.calledWith(
             {
               _id: ctx.user._id,
@@ -127,6 +130,7 @@ describe('AuthenticationManager', function () {
             },
             {
               $inc: { loginEpoch: 1 },
+              $unset: { ssoLoginProviderId: '' },
             },
             {}
           )

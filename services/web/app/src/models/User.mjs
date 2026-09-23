@@ -230,6 +230,15 @@ export const UserSchema = new Schema(
     },
     awareOfV2: { type: Boolean, default: false },
     samlIdentifiers: { type: Array, default: [] },
+    // Per-provider SSO role evaluation (P1c / plan 10 §0.8). Written on every login
+    // by modules/authentication/{saml,oidc}; the guest-create-refusal check in
+    // app/src/Features/Project/ProjectCreationHandler reads `ssoRoles[ssoLoginProviderId]`.
+    // Optional (no migration): absent = 'local' (pre-P1c accounts are all local).
+    // `ssoLoginProviderId` records the provider id of the most recent successful SSO
+    // login for THIS account (env synthetic id '1'/'saml'/'oidc' in env mode); cleared
+    // to undefined on password (non-SSO) login so non-SSO sessions are 'local'.
+    ssoRoles: Schema.Types.Mixed,
+    ssoLoginProviderId: { type: String },
     thirdPartyIdentifiers: { type: Array, default: [] },
     migratedAt: { type: Date },
     twoFactorAuthentication: {
