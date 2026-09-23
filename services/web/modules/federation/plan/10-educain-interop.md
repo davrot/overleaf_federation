@@ -1,7 +1,7 @@
 # 10 — eduGAIN / DFN-AAI (SAML) + GEANT AAI (OIDC) interop
 
-> Status: P1a (fe4 SSO framework port) DONE, P1b (N-provider dispatch) DONE (2026-09-22). Next: P1c (attrFilter) → Phase 0/2 (eduGAIN SAML via Shibboleth proxy). Paused goal
-> `3ea7bb53` — content-bridge 2a–2d queued behind this.
+> Status: P1a (fe4 SSO framework port) DONE, P1b (N-provider dispatch) DONE, **P1c (per-provider attrFilter roles) DONE** (2026-09-23, commit 8a99c05e79). Next: Phase 0 (Shibboleth proxy) → Phase 2 (DFN live) → Phase 3 (GEANT live) → Phase 4 (hardening). Paused goal
+> `3ea7bb53` (v2: `3dad1c9e`) — content-bridge 2a–2d queued behind this.
 > Primary sources: DFN-AAI doku (doku.tid.dfn.de); GEANT AAI Confluence export
 > (`/home/davrot/edugain`, extracted at `/tmp/edugain_txt/`); upstream
 > `overleaf-cep@fe4ceb6` ("Initial files", branch `sso`).
