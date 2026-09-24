@@ -427,6 +427,18 @@ Verified (no code change; the two tracks are structurally disjoint):
 
 ### Residual (not closed, recorded)
 
+- CoC/R&S category placement (R3, plan/10 §2.4 — Phase 4): **note only,
+  no app code** (R3 is the operator-confirmation item). Category travels
+  with (a) the proxy's Shibboleth SP metadata (as eduGAIN participant) and
+  (b) our own SP metadata at `/saml/meta` for the IdP-side R&S view. GÉANT
+  CoCo v.1 is deprecated 2026-01-01 per DFN's doku → **REFEDS CoC v.2** is
+  the declaration to file (mdv "Connected services" form + the proxy's
+  metadata; both proxy-side, not app-side). Our `/saml/meta` already emits
+  `Organization` + `ContactPerson` (the same metadata fields the DFN
+  registration requires — the G3 probe surfaces their presence/absence as
+  registrability markers), so the CoC category, when DFN confirms the exact
+  field, lands in the **metadata document** not the app (R3 confirmation
+  pending: proxy-vs-our-SP placement + DFN's accepted category string).
 - SSO admin SAML test endpoint — CLOSED in this pass (S19): the weak "GET
   entry-point reachability only" check is now extended per plan/10 Phase 2
   (G3) by `samlMetadataProbe.mjs` (fetch metadata URL + verify XML-DSig

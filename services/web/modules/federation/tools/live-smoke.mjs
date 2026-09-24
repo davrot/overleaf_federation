@@ -17,6 +17,13 @@
  *                     origin is rewritten to the local port
  *     - oidc-provider v9 — the full auth/consent/code interaction dance
  *     - jose       — ES256 key bootstrap, S2S client assertions, id_token
+ *     - UI surface (S20) — the module's `router` (admin REST incl. the
+ *                     dashboard shell + wizard JSON, invite preview REST,
+ *                     export wizard form/result views) and the module's
+ *                     `appMiddleware` (leaf EC + /federation/federation-keys)
+ *                     over real HTTP, with a mutable `loginAs` session switch
+ *                     (alice default / admin for guard checks /
+ *                     owner for the export consent dance)
  *   STUBS (the documented app-subsystem seams the two-instance test mocks —
  *     grant plumbing, project bytes):
  *     - CollaboratorsGetter.promises.getMemberIdPrivilegeLevel
@@ -51,6 +58,11 @@ import pug from 'pug'
 // ── real runtime (dynamic: Settings/Mongoose read env + connect at import) ──
 const Settings = (await import('@overleaf/settings')).default
 Settings.federation.enabled = true // master toggle (mutable plain object)
+// S20 UI e2e: both default false — the admin guard (isUserSiteAdmin)
+// hard-gates on `adminPrivilegeAvailable` before the `isAdmin` lookup, and
+// the B-side export S2S action hard-gates on `federation.export.enabled`.
+Settings.adminPrivilegeAvailable = true
+Settings.federation.export.enabled = true
 
 const S2sRouter = (await import('../s2s/S2sRouter.mjs')).default
 const { mountBridge } = await import('../oidc/bridge.mjs')
@@ -84,6 +96,19 @@ const UserSessionsManager = (
     '../../../app/src/Features/User/UserSessionsManager.mjs'
   )
 ).default
+const { Project } = await import('../../../app/src/models/Project.mjs')
+const { FederationExportGrant } = await import(
+  '../app/models/FederationExportGrant.mjs'
+)
+const db = (await import('../../../app/src/infrastructure/mongodb.mjs')).db
+// S20 UI surface mounts (the module's own router + appMiddleware, index.mjs).
+const AdminRouter = (await import('../admin/AdminRouter.mjs')).default
+const InviteRouter = (await import('../invite/FederatedInviteRouter.mjs'))
+  .default
+const ExportRouter = (await import('../invite/FederatedExportRouter.mjs'))
+  .default
+const { leafHandler } = await import('../oidf/leaf.mjs')
+const { leafJwksPayload, listPublicKeys } = await import('../oidf/keystore.mjs')
 
 // ── Mongoose + Redis (the app's own infrastructure, same singletons the
 //    module uses — no extra clients, no extra deps) ─────────────────────────
@@ -145,6 +170,25 @@ const [alice, owner] = await User.create([
   },
 ])
 
+// S20 UI e2e: the site admin (admin-guard positive path) + the B-side
+// project the export wizard targets (2a: owner B-native, live consent
+// grant to home A's client — minted on demand by the export scenarios).
+const admin = await User.create({
+  email: 'admin@beta.example',
+  first_name: 'Admin',
+  last_name: 'One',
+  institution: '',
+  suspended: false,
+  isAdmin: true,
+  analyticsId: crypto.randomUUID(),
+})
+const bProject = await Project.create({
+  name: 'beta project',
+  owner_ref: owner._id,
+  version: 1,
+  active: true,
+})
+
 // ── STUBS: the 4 app-subsystem seams (everything else is real) ─────────────
 const grants = []
 const sessions = []
@@ -160,6 +204,9 @@ UserSessionsManager.promises.trackSession = async (...args) => {
 }
 
 // ── app + mount (order LOCKED: S2S → bridge → callback → provider) ──────────
+// `loginAs` is the mutable session switch: default alice (scenarios 01–16),
+// admin for the admin-gated routes, owner for the export consent dance.
+let loginAs = alice
 const app = express()
 app.use((req, res, next) => {
   req.headers.host = 'beta.example'
@@ -167,14 +214,17 @@ app.use((req, res, next) => {
 })
 app.use(express.json())
 app.use((req, res, next) => {
-  // B-side login: the visitor is logged in as ALICE (the federated invitee's
-  // account on this origin — single-origin variant).
+  // B-side login: the visitor is logged in as `loginAs` (the federated
+  // invitee's account on this origin by default — single-origin variant).
   req.session = req.session ?? {}
-  req.session.user = req.session.user ?? { _id: String(alice._id) }
+  req.session.user = req.session.user ?? { _id: String(loginAs._id) }
   // Consent view: the bridge res.render's with the absolute template path.
+  // Some controllers pass extensionless paths (`'federation'`) expecting
+  // engine resolution — append `.pug` for the harness renderFile.
   res.render = (view, locals) =>
     new Promise((resolve, reject) => {
-      pug.renderFile(view, locals || {}, (err, html) => {
+      const tpl = view.endsWith('.pug') ? view : `${view}.pug`
+      pug.renderFile(tpl, locals || {}, (err, html) => {
         if (err) return reject(err)
         res.status(res.statusCode || 200).send(html)
         resolve()
@@ -191,6 +241,27 @@ app.use('/federation/oidc', async (req, res, next) => {
     await provider.callback()(req, res, next)
   } catch (err) {
     next(err)
+  }
+})
+
+// ── UI surface (S20): the module's `router` + `appMiddleware` (index.mjs) ──
+AdminRouter.apply(app, null, null)
+InviteRouter.apply(app, null, null)
+ExportRouter.apply(app, null, null)
+// Mirror `appMiddleware` (app-level leaf discovery + public key listing).
+// The OIDF wire path is FIXED by the specification (not this repo's
+// kebab URL rule) — disabled for that literal only (mirror index.mjs).
+// eslint-disable-next-line @overleaf/prefer-kebab-url
+app.get('/.well-known/openid-federation', (req, res, next) => {
+  leafHandler(req, res, next)
+})
+app.get('/federation/federation-keys', async (req, res, next) => {
+  try {
+    const jwks = await leafJwksPayload()
+    const keys = await listPublicKeys()
+    return res.json({ kid: keys.map((k) => k.kid), jwks })
+  } catch (error) {
+    next(error)
   }
 })
 
@@ -269,11 +340,11 @@ async function driveDance(authUrl) {
   throw new Error('driveDance: hop limit exceeded')
 }
 
-async function runAuthorize() {
+async function runAuthorize(anchor = 'alice@beta.example:beta.example') {
   const fakeReq = {
     body: {
       projectId: INVITE_PROJECT_ID,
-      anchor: 'alice@beta.example:beta.example',
+      anchor,
       privileges: 'readAndWrite',
     },
     user: { _id: String(owner._id) },
@@ -643,6 +714,247 @@ const scenarios = [
       const data = await res.json()
       check('200 federation-off', res.status === 200 && data.ok === false &&
         data.code === 'federation-off', data)
+    },
+  },
+  {
+    name: '13 OIDF discovery over HTTP: leaf EC + federation-keys',
+    fn: async () => {
+      const leaf = await fetch(`${base}/.well-known/openid-federation`, {
+        headers: { Accept: 'application/entity-statement+jwt' },
+      })
+      const leafBody = await leaf.text()
+      check('leaf 200', leaf.status === 200, { status: leaf.status })
+      check(
+        'leaf content-type entity-statement+jwt',
+        (leaf.headers.get('Content-Type') || '').startsWith(
+          'application/entity-statement+jwt',
+        ),
+        leaf.headers.get('Content-Type'),
+      )
+      check(
+        'leaf no-store cache',
+        (leaf.headers.get('Cache-Control') || '').includes('no-store'),
+      )
+      const parts = leafBody.split('.')
+      check(
+        'leaf is a 3-part signed EC',
+        parts.filter((p) => p.length > 0).length === 3,
+      )
+
+      const keysRes = await fetch(`${base}/federation/federation-keys`)
+      const data = await keysRes.json()
+      check('federation-keys 200', keysRes.status === 200, { status: keysRes.status })
+      check(
+        'bootstrap kid listed',
+        Array.isArray(data.kid) && data.kid.includes(keyRow.kid),
+        data.kid,
+      )
+      check(
+        'jwks payload has keys',
+        Array.isArray(data.jwks?.keys) && data.jwks.keys.length >= 1,
+      )
+    },
+  },
+  {
+    name: '14 admin dashboard over HTTP: non-admin redirect / admin 200 shell',
+    fn: async () => {
+      // Non-admin (alice: no `isAdmin` bit) hits `_redirectToRestricted`.
+      loginAs = alice
+      const denied = await fetch(`${base}/admin/federation`, {
+        redirect: 'manual',
+      })
+      check('non-admin 302', denied.status === 302, { status: denied.status })
+      check(
+        'non-admin redirect → /restricted?from=',
+        (denied.headers.get('Location') || '').startsWith('/restricted?from='),
+        denied.headers.get('Location'),
+      )
+
+      // Admin (admin user seeded isAdmin: true + adminPrivilegeAvailable).
+      loginAs = admin
+      const page = await fetch(`${base}/admin/federation`, {
+        redirect: 'manual',
+      })
+      const html = await page.text()
+      check('admin dashboard 200', page.status === 200, { status: page.status })
+      check(
+        'shell meta name=federation content=admin',
+        html.includes('name="federation" content="admin"'),
+        html.slice(0, 400),
+      )
+      check('wizard-list container present', html.includes('id="wizard-list"'))
+    },
+  },
+  {
+    name: '15 admin REST over HTTP: wizard JSON + peers/keys/audit',
+    fn: async () => {
+      // A fresh S2S receipt (federation audit row) is required both for
+      // wizard step 5 (s2s-proven) and for the audit-listing assertion.
+      const built = await buildS2sRequest('beta.example', 'authorize-invite', {
+        invitee: { origin: 'beta.example', localName: 'alice@beta.example' },
+        project: { ref: 'proj-1' },
+      })
+      const s2s = await postS2s(built)
+      const s2sData = await s2s.json()
+      check('S2S receipt 200 ok', s2s.status === 200 && s2sData.ok === true, s2sData)
+
+      const wizRes = await fetch(`${base}/admin/federation/wizard`)
+      const wiz = await wizRes.json()
+      check('wizard 200', wizRes.status === 200, { status: wizRes.status })
+      check(
+        'wizard ok + 5 steps all done',
+        wiz.ok === true &&
+          wiz.steps.length === 5 &&
+          wiz.steps.every((s) => s.done === true),
+        wiz,
+      )
+      check(
+        'wizard settings incl s2sFetchTimeoutMs',
+        typeof wiz.settings?.s2sFetchTimeoutMs === 'number',
+        wiz.settings,
+      )
+      check(
+        'wizard step names (module→leaf→s2s)',
+        wiz.steps.map((s) => s.name).join(',') ===
+          'module-enabled,identity-key,first-peer-approved,leaf-published,s2s-proven',
+        wiz.steps.map((s) => s.name),
+      )
+
+      const peers = await (await fetch(`${base}/admin/federation/peers`)).json()
+      check(
+        'peers: beta.example approved',
+        peers.peers?.some((p) => p.origin === 'beta.example' && p.status === 'approved'),
+        peers.peers,
+      )
+
+      const keysData = await (await fetch(`${base}/admin/federation/keys`))
+        .json()
+      check(
+        'keys: bootstrap kid active',
+        keysData.keys?.some((k) => k.kid === keyRow.kid && k.state === 'active'),
+        keysData.keys,
+      )
+
+      const auditData = await (await fetch(`${base}/admin/federation/audit`))
+        .json()
+      check(
+        'audit: federation rows listed',
+        auditData.entries?.some(
+          (e) => e.operation === 'federated_invite_approved',
+        ),
+        auditData.entries?.map((e) => e.operation),
+      )
+    },
+  },
+  {
+    name: '16 invite preview REST over HTTP (was in-process only)',
+    fn: async () => {
+      loginAs = alice
+      const res = await fetch(
+        `${base}/api/federation/invite/preview?anchor=${encodeURIComponent('alice@beta.example:beta.example')}`,
+      )
+      const data = await res.json()
+      check('preview 200', res.status === 200, { status: res.status })
+      check(
+        'approved + displayName',
+        data.approved === true && data.displayName === 'Alice Beta',
+        data,
+      )
+    },
+  },
+  {
+    name: '17 export wizard REST: form render + refusal path (no consent grant)',
+    fn: async () => {
+      loginAs = alice
+      const form = await fetch(`${base}/federation/export`)
+      const formHtml = await form.text()
+      check('export form 200', form.status === 200, { status: form.status })
+      check(
+        'form lists the beta.example peer',
+        formHtml.includes('value="beta.example"'),
+        formHtml.slice(0, 400),
+      )
+      check('form has fed-csrf meta', formHtml.includes('name="fed-csrf"'))
+
+      const denied = await fetch(`${base}/federation/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          origin: 'beta.example',
+          projectId: String(bProject._id),
+        }),
+      })
+      await denied.text()
+      check('export refused 403 (no live consent)', denied.status === 403, {
+        status: denied.status,
+      })
+      const audit = await ProjectAuditLogEntry.findOne({
+        operation: 'federation_export_denied',
+      }).lean()
+      check('audit row federation_export_denied', Boolean(audit))
+    },
+  },
+  {
+    name: '18 export wizard happy path: re-driven consent → S2S → PAT result view',
+    fn: async () => {
+      // `resetState()` flushed Redis (the consent grant is gone): re-drive
+      // the dance AS OWNER so a live (owner, beta-client) grant exists —
+      // the export POST (S2S export-project) only checks that B-native
+      // owner holds a live consent grant to home A's client (09 §2.1). It
+      // does NOT consume the A-side `rp/callback` (that's the v1 identity
+      // mirror, a separate path) — the grant is minted at the consent step
+      // inside `driveDance`, before the code is issued.
+      loginAs = owner
+      const res0 = await runAuthorize('owner@beta.example:beta.example')
+      const dance = await driveDance(res0.location)
+      check('consent code minted (owner)', Boolean(dance.code))
+
+      // loginAs must stay owner for the export POST? No — the POST is
+      // requireLogin (any A-side user); the B-side checks (owner, beta
+      // -client) against the grant minted above. Keep it owner for clarity.
+      const res = await fetch(`${base}/federation/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          origin: 'beta.example',
+          projectId: String(bProject._id),
+        }),
+      })
+      const html = await res.text()
+      check('export result 200', res.status === 200, { status: res.status })
+      const pat = html.match(/olp_[A-Za-z0-9]{36}/)?.[0]
+      check('PAT rendered (olp_ + 36 chars)', Boolean(pat))
+      check(
+        'clone command carries beta.example/git',
+        html.includes('beta.example/git/'),
+      )
+      check('scope federation:git_bridge', html.includes('federation:git_bridge'))
+
+      // The raw PAT is never persisted: sha256 + prefix only (2a/09 §3).
+      const patDoc = await db.oauthAccessTokens
+        .findOne({ scope: 'federation:git_bridge', user_id: String(owner._id) })
+        .catch(() => null)
+      check(
+        'sha256 PAT doc (partial prefix)',
+        Boolean(patDoc) && patDoc.accessTokenPartial === pat?.substring(0, 8),
+        patDoc,
+      )
+      check('raw PAT not persisted', Boolean(patDoc) && !JSON.stringify(patDoc).includes(pat))
+
+      const ledger = await FederationExportGrant.findOne({
+        projectId: String(bProject._id),
+      }).lean()
+      check(
+        'ledger row exported (owner)',
+        Boolean(ledger) &&
+          ledger.status === 'exported' &&
+          String(ledger.owner) === String(owner._id),
+        ledger,
+      )
+      const audit = await ProjectAuditLogEntry.findOne({
+        operation: 'federation_export_requested',
+      }).lean()
+      check('audit row federation_export_requested', Boolean(audit))
     },
   },
 ]

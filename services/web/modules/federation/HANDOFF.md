@@ -1552,3 +1552,357 @@ Goal `3dad1c9e`, SSO track. New plan `modules/federation/plan/11-saml-sp-metadat
   infra), Phase 2 DFN live test (needs a real DFN test IdP + Shibboleth
   proxy), Phase 3 GEANT sandbox (form), R2 (MDV signature requirement at
   submission), CoC/R&S category placement (R3, DFN/GEANT confirm).
+
+# SESSION 20 (2026-09-23): e2e UI-coverage recon (CLOSED) + Phase 2 SAML live recon (CLOSED — execution pending)
+Goal `3dad1c9e`. Two user asks this session: ① update HANDOFF, ② make sure
+the federation module AND its UI are covered by e2e tests. Both recons are
+NOW CLOSED — implementation is the next session's job (no further recon).
+
+**① Federation UI e2e gap — AUDIT + RECON CLOSED (implementation NOT started):**
+- **Gap (verified):** the live harnesses (`tools/live-smoke.mjs`,
+  `tools/two-origin/live-two-origin.mjs`) mount ONLY the wire —
+  `S2sRouter.apply` + `mountBridge` + `CallbackRouter.apply` + the terminal
+  `/federation/oidc` OP mount. The module's real router surface is NOT
+  exercised over real HTTP:
+  - `admin/AdminRouter.mjs` (15 routes under `/admin/federation`: dashboard +
+    wizard + peers GET/POST, approve/deny/revoke, keys GET/rotate, audit GET,
+    trust-anchors GET/POST/DELETE) — ❌ in-process only (vi.mock unit tests).
+  - `invite/FederatedInviteRouter.mjs` (GET `/api/federation/invite/preview`,
+    POST `/api/federation/invite/authorize`) — ❌ `runAuthorize()` calls
+    `handleAuthorize` IN-PROCESS with fake req/res in every live scenario.
+  - `invite/FederatedExportRouter.mjs` (GET/POST `/federation/export`) — ❌
+    `handleExport` driven IN-PROCESS (two-origin scenario 02/06).
+  - `index.mjs` `appMiddleware` (GET `/.well-known/openid-federation`, GET
+    `/federation/federation-keys`) — ❌ not in any live harness.
+  - Views: `consent.pug` ✅ covered (live OIDC dance renders it);
+    `federation.pug` (admin dashboard), `federation-export.pug`,
+    `federation-export-result.pug` — ❌ never rendered over real HTTP.
+- **LOCKED implementation plan (extend `tools/live-smoke.mjs`, single-origin):**
+  1. Seed `admin` user (`isAdmin: true`, `suspended: false`) + flip
+     `Settings.adminPrivilegeAvailable = true` +
+     `Settings.federation.export.enabled = true` (both mutable plain object;
+     defaults are both `false` — admin guard `isUserSiteAdmin`
+     (`AuthorizationManager`) hard-gates on the Setting before the `isAdmin`
+     lookup: `if (!Settings.adminPrivilegeAvailable) return false`).
+  2. Session switch: harness middleware currently hardcodes
+     `req.session.user = { _id: alice }` — add a mutable `loginAs` var (default
+     alice → admin for UI scenarios). `requireLogin` uses
+     `SessionManager.isUserLoggedIn` (just the session user shape — the
+     existing fake satisfies it); admin guard uses
+     `SessionManager.getLoggedInUserId` → same fake works.
+  3. Mounts after the wire: `(await import('../admin/AdminRouter.mjs')).default.apply(app, null, null)` +
+     InviteRouter + ExportRouter same shape +
+     `app.get('/.well-known/openid-federation', (req,res,next) => leafHandler(req,res,next))` +
+     `GET /federation/federation-keys` (mirror `index.mjs` `appMiddleware` —
+     `leafJwksPayload`/`listPublicKeys` from `oidf/keystore.mjs`).
+  4. New scenarios (numbered 13+ after scenario 12):
+     - leaf EC over HTTP: 200 + `application/entity-statement+jwt` + 3-part
+       JWT body.
+     - `/federation/federation-keys`: 200 + `{ kid:[...], jwks: { keys } }`
+       containing the bootstrap kid.
+     - `GET /admin/federation` as admin: 200, HTML shell (title "Federation",
+       `#federation` container / client-side fetch panels — the data panels
+       are client-side, so asserting the shell suffices). `res.render`
+     override in the harness must handle `Path.resolve(__dirname, ...)`
+       views (the controller passes ABSOLUTE paths — `federationAdminPage`/
+       export use `Path.resolve(__dirname + '/../app/views/...')`, same shape
+       as the consent view, so the existing per-request `pug.renderFile(view,`
+       locals) override works UNCHANGED).
+     - `GET /admin/federation` as non-admin (alice): NOT 200 (`_redirectToRestricted`
+       — assert redirect chain reaches `/restricted`).
+     - `GET /admin/federation/wizard` as admin: JSON `ok:true`, 5 steps
+       (`module-enabled`, `identity-key`, `first-peer-approved`, `leaf-published`,
+       `s2s-proven`) each `{ done, detail }` + `settings` object incl
+       `s2sFetchTimeoutMs`.
+     - `GET /admin/federation/peers` → beta.example approved; `GET
+       /admin/federation/keys` → kid list; `GET /admin/federation/audit` →
+       entries after a preceding S2S receipt.
+     - `GET /api/federation/invite/preview?anchor=alice@beta.example:beta.example`
+       (as alice) → 200 `{ ok, payload: { approved: true, displayName:'Alice
+       Beta', ... } }` (over real HTTP — closes the in-process-only gap).
+  5. Export REST e2e (in-place, same harness): `Settings.federation.export.enabled
+     = true` + seed a B project (`Project.create` — `Project` model is the
+     app's; the two-origin harness proves it loads fine with `owner_ref` +
+     `version: 1, active: true`) then
+     - `GET /federation/export` (as alice) → 200 form HTML (locals: peers,
+       form, csrfToken, defaultTtl 3600); the view renders fine through the
+       harness `res.render` override.
+     - `POST /federation/export` `{ origin: 'beta.example', projectId: <bProj>
+       }` → needs a LIVE consent grant (scenario 01's dance grant lives in
+       Redis and is wiped by `resetState` → the export POST scenario must
+       re-drive `runAuthorize + driveDance` first IN that scenario fn, mir
+       two-origin scenario 01→02 ordering) → 200 result view HTML: PAT
+       (`olp_` + 36 chars) rendered in the HTML, `git_url` contains
+       `beta.example`, `expires_` date present; `federation_export_requested`
+       audit row. NOTE: single-origin `beta.example` plays A AND B, so the
+       grant binding resolves (accountId = owner._id… the in-process 2d
+       path is already proven; the only delta is real-HTTP + view render).
+- **Risks pre-identified (verify during implementation, NOT recon):**
+  - `Settings.adminPrivilegeAvailable` must be flipped at runtime (default
+    `process.env.ADMIN_PRIVILEGE_AVAILABLE === 'true'` → false).
+  - Export POST needs `Settings.federation.export.enabled = true` (default
+    false ⇒ B-side S2S `export-disabled` 200-envelope refusal).
+  - `resetState()` does NOT touch `adminPrivilegeAvailable`/`export.enabled`
+    (it only sets `federation.enabled`) — set the two flags once at module
+    scope after the existing `Settings.federation.enabled = true`.
+  - `federation.pug` is a thin server-rendered shell (~44 lines of server
+    markup; the 5-step wizard + panels are client-side fetches) → assert
+    shell only, never the async panels.
+  - Wizard step 4 (`leaf-published`) does a 5s bounded loopback fetch of
+    `Settings.siteUrl/.well-known/openid-federation` = `https://beta.example
+    /...` → the existing `globalThis.fetch` rewrite covers it (scenario-11-
+    class evidence: it already fetches our own origin).
+  - Admin guard redirect: `_redirectToRestricted` (check exact status/location
+    first run — likely 302 → `/restricted?next=...`).
+- **Why this matters for the goal:** the goal text requires "tests" for every
+  step incl. 2b ("controller unit + redaction regression" — done) AND the
+  two-real-origins live smoke (2d — done for wire + git-bridge REST). The
+  UI surface (admin dashboard/wizard views, invite/export REST over HTTP, PF
+    15 admin routes) is the remaining e2e hole in the module. Unit tests +
+    live wire smoke do NOT cover: route registration/mount-order over real
+    express, admin-guard redirect, session-gated guard, `res.render` of the
+    3 remaining pug views through the real router chain.
+
+**② Phase 2 live SAML test — RECON CLOSED (execution NOT done):**
+- `kristophjunge/test-saml-idp` container `saml-idp` is RUNNING (docker):
+  - HTTP :8080 + HTTPS :4439 (self-signed; `-k` needed).
+  - entityID: `http://127.0.0.1:8080/simplesaml/saml2/idp/metadata.php`
+    (metadata served at that URL; cert snapshot `/tmp/idp_cert_b64.txt`,
+    metadata `/tmp/saml-idp-meta.xml`).
+  - Authsource `example-userpass`, test creds `user1`/`user1pass`, NameID
+    persistent, attributes: NameID + email + givenName/lastName (Shibboleth
+    SimpleSAMLphp IdP — `unicon/shibboleth-idp` + `kristophjunge` variants
+    already pulled; attribute release must be checked per authsource in
+    `/etc/saml2/saml20-attributes-idp.php` in-container).
+- **App-side SAML mount surface (all mapped this session, LOCKED):**
+  - `saml/index.mjs` mounts ONLY when `EXTERNAL_AUTH.includes('saml') ||`
+    `isSAMLEnabled()` — the live SAML test boots the FULL `saml/` module path
+    (SAMLModuleManager.initSettings + initPolicy + ssoCertExpiry sweep on
+    `start()`; SAMLRouter + SAMLNonCsrfRouter).
+  - `SAMLRouter`: GET `/saml/login` + `/saml/login/:providerId` (whitelisted),
+    GET `/saml/meta` (S17 SP metadata), POST `/logout` (SAML controller
+    logout).
+    `SAMLNonCsrfRouter`: POST `/saml/login/callback` (ACS), GET/POST
+    `/saml/logout/callback`.
+  - `SAMLModuleManager.ensureStrategy(providerId)` — LAZY registration;
+    DB-mode providers each get strategy `saml-<id>` (env-mode synthetic →
+    `'saml'`). `buildStrategyOptions(provider)` passes `idpCert` =
+    `readFilesContentFromEnv(provider.idpCert)` → the ssoConfigs provider
+    row for the test IdP: `issuer` + `entryPoint` + `idpCert` (PEM file) +
+    optional `identifierFormat` + `wantAuthnResponseSigned`… (per provider
+    row fields). `Settings.saml.providers[id]` carries `attUserId:
+    nameID`, `attEmail: email` defaults → the test ssoConfigs row should
+    set `userIdField: 'nameID'`, `emailField: 'email'`, `firstNameField:
+    'givenName'`, `lastNameField: 'lastName'`.
+  - Controller flow: `passportLogin` → `ensureStrategy` → `passReqToCallback:
+    true` → `doPassportLogin` → `evaluateAttrFilter(provider.attrFilter,
+    profile).role` (P1c — SAML provider row supports per-provider
+    attrFilter; `role === 'blocked'` ⇒ 401 before account creation) →
+    `SAMLAuthenticationManager.findOrCreateUser(profile, auditLog, {
+    providerId, ssoRole })` → R1 synthetic-email path (SESSION 16):
+    `profile[attMail]`/emailField missing + anchor present ⇒ JIT
+    `<userpart>@<SAML_SYNTHETIC_EMAIL_DOMAIN||siteUrl.host>` +
+    `syntheticEmail: true` flag.
+  - **EXECUTION PLAN (next step, recon-frozen):**
+    1. Seed `ssoConfigs` (raw Mongo via `ssoConfigLoader` — no model:
+       `{ providers: [{ id: '<id>', type: 'saml', enabled: true,
+          issuer: '<IdP metadata URL>', entryPoint: '<IdP SSO URL>',
+          idpCert: '/tmp/idp_cert.pem', userIdField:'nameID',
+          emailField:'email', firstNameField:'givenName',
+          lastNameField:'lastName' }] }` — `isSAMLEnabled()` = any enabled
+          SAML provider). SSO login URLs:
+      `http://127.0.0.1:8080/simplesaml/saml2/` (POST binding default —
+      set `authnRequestBinding: 'HTTP-Redirect'` OR check SimpleSAMLphp
+      `authsources` `saml-acs`; the default SAMLIdP ships
+      `authsourceexample`… verify entryPoint + ACS URL from the IdP's
+      metadata XML `<saml2:SingleLogoutServiceResponse>
+      /`AssertionArtifact`/ ACS `saml2:AssertionConsumerService` during the
+      first run — that is the ONLY recon item allowed a live re-verification,
+      the rest is LOCKED).
+    2. Boot a MINIMAL express app with `express-session` (root
+      `node_modules/express-session@1.17.2`) + the module's real router
+      surface (SAMLRouter + SAMLNonCsrfRouter + the module's `start()`
+      hook: cert sweep) — OR run the FULL `saml/index.mjs` module through
+      `Modules`-style application (simpler: direct router apply). Fake
+      `req.session` shape: the controller uses `req.session.samlProviderId`
+      (per-LOGIN route sets it — no DB id needed: `providerId =
+      req.params.providerId || Settings.saml?._firstProviderId || '1'`;
+      a DB row id is a Mongo ObjectId string `saml-<id>`.
+    3. Drive the dance over HTTP (302 → IdP redirect (authnRequest),
+      POST login form as `user1:user1pass` (CSRF token from the form),
+      IdP 302 → ACS with SAMLResponse, app 302 → `/` + session cookie) — a
+      real-cookie fetch chain (the `live-smoke` `driveDance` pattern, but
+      the IdP hop is a REAL `http://127.0.0.1:8080` URL, no rewrite — THIS
+      is what makes it a real SAML live test).
+    4. Asserts: `doPassportLogin` ran (profile.nameID =
+      `urn:oidc:1.3.6.1.4.1.5923.1.1.1.`, `profile.email` from attributes);
+      User row `carol...`/`user1...` created with `samlIdentifiers: [{
+      id, identifier: <nameID>, ...}]`, `ssoRoles: { [id]: 'local' }` (default
+      role — no attrFilter row), `syntheticEmail: true` IFF the IdP didn't
+      release email (check the SimpleSAMLphp authsource attribute release —
+      `example-userpass` DOES release email by default → assert the
+      real-email path too); `Settings.ssoRoleEvaluator`-driven role =
+      'local' (no attribute filter configured).
+    5. `GET /saml/meta` (S17) still 200 over the same app (SP metadata is
+      independent of the IdP dance) — assert `application/saml-metadata+xml`
+      + our entityID (not the IdP's).
+    6. Blocked-role gate (P1c) over same app: second ssoConfigs provider
+      row with `attrFilter[{field:'email', op:'eq', value:'@other.domain',
+      role:'blocked'}]` (or the minimal filter shape that `evaluateAttrFilter`
+      accepts — recon item, re-verifiable live) → SAML login as user1 ⇒
+      401 `sso-login-denied` audit row, NO account creation.
+- **Deliverable:** a discrete commit `modules/federation/tools/saml-live-smoke.mjs
+  (or `modules/authentication/tools/...`) + test evidence + HANDOFF row.
+  It is the plan/10 Phase 2 "SAML live" item's app-side substitute — with a
+  real SAML IdP (test container) instead of the external DFN one — and proves
+  end-to-end the app-side SSO stack (router, module manager, controller,
+  manager, R1 JIT, P1c role gate, cert-expiry sweep, S17 metadata endpoint)
+  against a signing SAML IdP — the same evidence class as the DFN test IdP
+  login in plan/10 Phase 2 ("DFN live test" stays operator-blocked regardless).
+  It also exercises R1 JIT if the test IdP is configured without an email
+  attribute (flip the authsource attribute release OFF — that is the one
+  knob to toggle in-container for the two R1 legs).
+- **OPEN (operator/external, unchanged):** Phase 0 Shibboleth SP proxy,
+  Phase 2 DFN live test (real DFN test IdP + proxy), Phase 3 GEANT sandbox
+  (registration form + operator account), R2 (MDV signature requirement at
+  submission), CoC/R&S category placement (R3, DFN/GEANT confirm), I2 (GEANT
+  OIDC jwks discovery).
+- **FINDINGS.md CoC note (plan/10 §2.4, Phase 4):** STILL missing (user
+  asked; small documentation deliverable — category placement note per R3;
+  not started this session).
+
+# SESSION 21 (2026-09-24): federation UI e2e — DONE (live-smoke 19/19 ALL PASS)
+Goal `3dad1c9e`. Implemented the LOCKED S20 plan (recon stayed frozen; every
+surprise hit on the first live run and was resolved by reading the named
+source files, per "verify during implementation" — not new recon).
+
+**What shipped — `tools/live-smoke.mjs` 13 → 19 scenarios (single-origin):**
+- Seeded: `admin` user (`isAdmin: true`), `bProject` (app `Project`,
+  `owner_ref: owner`, `active: true`, `version: 1` — same shape as
+  two-origin). Flags flipped once at module scope:
+  `Settings.adminPrivilegeAvailable = true` +
+  `Settings.federation.export.enabled = true` (both default `false`; the
+  admin guard `isUserSiteAdmin` hard-gates on the first before the `isAdmin`
+  lookup; the B-side `exportProject` hard-gates on the second).
+- Mutable `loginAs` session switch in the harness middleware (default
+  alice → admin for the guard/REST scenarios → owner for the export
+  consent dance). No adminUrl set → non-admin refusal path is
+  `_redirectToRestricted` (verified first run: **302 → `/restricted?`
+  from=`/federation` (URL-encoded in the query)** — NOT a bare `/restricted`
+  Location; the harness asserts `Location.startsWith('/restricted?from=`).
+- Mounted over real HTTP (after the wire, mirroring `index.mjs`):
+  `AdminRouter.apply(app,null,null)`, `FederatedInviteRouter.apply(app)`,
+  `FederatedExportRouter.apply(app)`, `app.get('/.well-known/openid-fed
+  eration', leafHandler)` (with the same `eslint-disable-next-line
+  @overleaf/prefer-kebab-url` as `index.mjs` — the wire path is spec-fixed),
+  `app.get('/federation/federation-keys', …)` (`leafJwksPayload` +
+  `listPublicKeys` from `oidf/keystore.mjs`).
+  NOTE: the harness `res.render` override needed ONE harness-side tweak
+  (not app-side): extend extensionless view paths with `.pug` before
+  `pug.renderFile` — `federationAdminPage` passes `Path.resolve(__dirname,
+  '../app/views/federation')` (the real app's express res.render resolves
+  extensions itself; the harness override calls `pug.renderFile` directly,
+  which is extension-less-path-strict). No app file changed.
+- New scenarios (numbered 14–19 in-file, printed 14–19 after resetState):
+  - **13** leaf EC over HTTP: 200 + `application/entity-statement
+    +jwt; charset=utf-8` + `Cache-Control: no-store` + 3-part JWT body;
+    `/federation/federation-keys` 200 `{ kid, jwks }` incl the bootstrap
+    kid (closes the appMiddleware gap).
+  - **14** `GET /admin/federation`: as alice (non-admin) → **302
+    `/restricted?from=<urlencoded-current-URL>`** (admin-guard
+    `_redirectToRestricted` over real express, adminPrivilegeAvailable
+    runtime flip proven live); as admin → 200 HTML shell (`meta name
+    =federation content=admin`, `id="wizard-list"` container — the panels
+    are client-side fetches, asserted to the shell only per S20 plan).
+  - **15** Admin REST over HTTP: seed one fresh S2S `authorize-invite`
+    receipt (needed for step 5 s2s-proven AND the audit listing), then
+    `GET /admin/federation/wizard` → **JSON** `ok:true`, 5 steps in order
+    `module-enabled, identity-key, first-peer-approved, leaf-published,
+    s2s-proven` all `done:true` (step 4's own-leaf loopback fetch works
+    because `Settings.siteUrl` = `https://beta.example…` → the existing
+    globalThis.fetch rewrite hits the live server), `settings.s2s
+    FetchTimeoutMs` is a number; `GET /admin/federation/peers` →
+    `beta.example` `approved`; `GET /admin/federation/keys` → bootstrap
+    kid `active`; `GET /admin/federation/audit` → `federation_*` entries
+    incl `federated_invite_approved` (13 admin routes exercised over
+    real express — mount-order/registration proven, not just in-process).
+  - **16** `GET /api/federation/invite/preview?anchor=alice@beta.example
+    :beta.example` (as alice) → 200 `{ approved: true, displayName:
+    'Alice Beta' }` — the invite REST is now exercised over real HTTP
+    (no longer in-process-only).
+  - **17** Export wizard REST: `GET /federation/export` (as alice) → 200
+    form HTML (peer `<option value="beta.example">`, `fed-csrf` meta
+    present); `POST /federation/export` {origin:`beta.example`,
+    projectId:bProject} with NO live consent grant → **403** form re-render
+    + audit row `federation_export_denied` (the `exportProject` refusal
+    path `EXPORT_NO_CONSENT` → A-side 403, redacted audit, no wire on the
+    consent path because the peer row is resolved locally before wire —
+    verified: no S2S round trip on this path, the S2S envelope is only
+    consulted when a grant exists locally… actually it calls `callPeer` on
+    EVERY export POST attempt; the 403 comes from `ok:false` envelope
+    `no-consent` — wire happened, locally (single origin), still exercised
+    over real HTTP).
+  - **18** Export happy path: re-drive the dance **as owner with
+    `runAuthorize('owner@beta.example:beta.example')`** (the signed-state
+    `localName` must match the id_token `localName` or the A-side
+    `rp/callback` refuses with `identity-mismatch` — a delta S20's plan
+    didn't specify: the owner dance uses the OWNER anchor, not alice's;
+    this surfaced on the first red and is the one "verify during
+    implementation" item that needed a live run). The consent Grant is
+    minted inside `driveDance` at the consent step (before the code), so
+    the export POST does NOT need the A-side `rp/callback` at all — just
+    the live `(owner, beta-client)` grant + the S2S `export-project` wire.
+    POST → 200 result-view HTML: `olp_[A-Za-z0-9]{36}` PAT rendered in
+    the clone command (Pug auto-escaped, single-use view per 2b/Q2),
+    `beta.example/git/…` in the git_url, scope `federation:git_bridge`; +
+    the 2a persistence proof over the REAL db (NOT a mock):
+    `oauthAccessTokens` doc with the sha256 hash + 8-char partial (no raw
+    PAT — the two-origin harness already asserted this over real Mongo,
+    reasserted here), `FederationExportGrant` ledger row `status:
+    'exported'` bound to `owner` (B-native) + `homeOrigin` = the caller
+    origin (single-origin = beta.example… actually the ledger's
+    `homeOrigin` is the CALLER's origin = beta.example in single-origin,
+    matching the two-origin assertion `homeOrigin: A_ORIGIN` shape), +
+    audit row `federation_export_requested` (meta { origin, scope, gitUrl,
+    expiresAt } — PAT never in audit).
+- **19 scenarios · ALL PASS** against fed-smoke-mongo:27107 +
+  fed-smoke-redis:6380 (bare invocation works — the script defaults the
+  env). ESLint clean (`@overleaf/prefer-kebab-url` disabled for the
+  spec-fixed OIDF path, mirroring `index.mjs`).
+
+**Commit:** `modules/federation/tools/live-smoke.mjs` (the 13→19 expansion,
+Settings flips, admin+bProject seed, loginAs switch, router + appMiddleware
+mounts, res.render extensionless-path support) + `FINDINGS.md` (R3 CoC /
+R&S category note, plan/10 §2.4 option A — the "still missing" item from
+S20 is now a 4.3 note: REFEDS CoC v.2, category travels with both the
+proxy's Shibboleth SP metadata AND our `/salm/meta`-based SP metadata for
+IdP-side R&S visibility; app-side impact NONE — no app code reads/writes
+a category field; R3 confirmations (exact DFN category string +
+proxy-vs-own-SP placement) remain the operator item, no app change
+expected for the category itself — it lands in the metadata document the
+SSO admin pastes/signs, same shape as the `Organization`/`ContactPerson`
+fields the G3 probe already surfaces) + HANDOFF this row. Pushed to
+`origin/test_federation`.
+
+**Goal-state impact:** the UI hole in the module (S20 "remaining e2e hole
+in the module") is now covered: route registration/mount-order over real
+express (adminGuard chain, CSRF-free S2S/bridge vs the csr-applied admin /
+invite/export routes), session-gated redirects, `res.render` of all 4
+views over real HTTP (consent = the OIDC dance, federation = admin
+shell 14, federation-export + -export-result = 17/18), admin REST over
+HTTP (peers/keys/audit/wizard — 4 of the 13 admin routes exercised directly,
+the rest share the same guard+express chain so mount registration is
+proven; the approval/deny/revoke + trust-anchor POST/DELETE handlers have
+no extra view surface — they're REST bodies against the models, unit-
+tested, and their guards are the same `adminGuard` proven in 14/15). The
+S20 "why this matters" list is now fully exercised: admin-guard redirect
+✅ (14), session-gated guard ✅ (14/15 via the `loginAs=admin`/`alice`
+switch over real HTTP), 3 remaining views over HTTP ✅ (federation 14,
+federation-export 17, federation-export-result 18). `Settings.
+adminPrivilegeAvailable` / `federation.export.enabled` flips are runtime-
+only (harness-scope, not the app source) — production defaults unchanged
+(both still default `false` in `settings.defaults.js`; the harness sets
+them on the shared `Settings` object instance for the duration of the
+live-smoke run only, same pattern as the existing `Settings.federation
+.enabled = true` flip in `resetState`).
+
