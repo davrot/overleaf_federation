@@ -35,6 +35,7 @@
 // SESSION 11 "S2S envelope" item).
 
 import Path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import logger from '@overleaf/logger'
 import Settings from '@overleaf/settings'
 
@@ -54,10 +55,13 @@ const SCOPE = 'federation:git_bridge'
 const DEFAULT_TTL_SECONDS = 3600
 const MAX_TTL_SECONDS = Settings.federation?.export?.maxExportTtlSeconds || 86400
 
-const EXPORT_VIEW = Path.resolve(__dirname, '../app/views/federation-export')
+// ESM: `__dirname` is a vitest shim — undefined under real Node ESM (an
+// app-boot crash the 2b unit suite could never see; vitest injects it).
+const __dirname = Path.dirname(fileURLToPath(import.meta.url))
+const EXPORT_VIEW = Path.resolve(__dirname, '../app/views/federation-export.pug')
 const EXPORT_RESULT_VIEW = Path.resolve(
   __dirname,
-  '../app/views/federation-export-result',
+  '../app/views/federation-export-result.pug',
 )
 
 function _ttlSeconds(raw) {

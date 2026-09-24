@@ -110,7 +110,7 @@ describe('handleExportFormGet', () => {
     await handleExportFormGet(req, res)
     expect(res.rendered).toHaveLength(1)
     const { view, locals } = res.rendered[0]
-    expect(view).toMatch(/federation-export$/)
+    expect(view).toMatch(/federation-export\.pug$/)
     expect(locals.peers).toEqual([
       { origin: 'b.example', displayName: 'B' },
     ])
@@ -139,7 +139,7 @@ describe('handleExport', () => {
     expect(res.statusCode).toBe(200)
     expect(res.rendered).toHaveLength(1)
     const { view, locals } = res.rendered[0]
-    expect(view).toMatch(/federation-export-result$/)
+    expect(view).toMatch(/federation-export-result\.pug$/)
     // Wire (03 §2): action + payload (B re-clamps expiresAt server-side).
     expect(globalThis.__CALL_PEER_CALLS).toHaveLength(1)
     const call = globalThis.__CALL_PEER_CALLS[0]

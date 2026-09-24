@@ -289,11 +289,39 @@ B-side 401s are the gate). Documented.)
   /FederationAdminController.test.mjs` (2 cases: sweep on transition
   flag-INDEPENDENT + idempotent double-revoke). 183/183 (177 fed + 6
   git-bridge) green. Lint clean on all touchable 2c files.
-- **OPEN for 2d:** 2-real-origins (A≠B) live docker smoke — export
-  wizard → S2S export-project → PAT fetch + **live push-gets-403**
-  against the deployed git-bridge (the guard is in this repo's
-  Node REST surface; 2d verifies both the Bearer and Basic-info
-  surfaces end-to-end).
+- **2d (two-real-origins A≠B live docker smoke) — SHIPPED** (SESSION 15) —
+  `tools/two-origin/live-two-origin.mjs` (driver = origin A `alpha.example`,
+  the RP; owns shared Mongo `fedsmoke2` + Redis `flushall`, spawns B,
+  fetch-rewrites both origins) + `tools/two-origin/live-smoke-b.mjs`
+  (origin B `beta.example` = home OP + git-bridge REST). 7 scenarios
+  ALL PASS (real end to end: Mongo/Redis/express/oidc-provider v9/jose;
+  fakes = logins + the 4 v1 app seams): (1) cross-origin v1 dance →
+  mirror + **live consent-grant account index** (the 2a binding), (2)
+  2b wizard → 2a S2S mint (`olp_` `federation:git_bridge` PAT,
+  sha256-only doc + ledger `exported`), (3) live REST: export-PAT
+  read reaches controller (400 sidecar), export-PAT **write → 403 (the
+  2c guard)**, normal-PAT write passes guard (500) + token/info 200,
+  (4) 10 mints idempotent + 11th → **429 + `Allow-Retry-After`**,
+  (5) S2S revoke → peer `revoked` + 2c sweep (ledger `revoked`, PAT
+  deleted scope-guarded, `federation_export_swept`), (6) swept PAT →
+  401 everywhere + wizard 502 `peer-not-approved` +
+  `federation_export_denied`, (7) S2S 401 `peer-not-approved`. Two
+  PRODUCTION bugs caught live (the whole unit suite, incl. the
+  vi.mocked `FederationExportGrant`, could not reach — SESSION 10
+  class, fixed + regression-tested):
+  1. **2a ledger upsert was a no-op**: `FederationExportGrant.updateOne(
+     filter, { $set, $setOnInsert })` was called **without
+     `{ upsert: true } }`** → `$setOnInsert` never applied, `matched
+     0/upserted 0`, so NO ledger row ever persisted → the 2c sweep had
+     nothing to sweep + 2a's ledger guarantee silently unmet.
+  2. **mirror mark = `federation.origin`, NOT bare subdoc presence**: a
+     populated EMPTY `{}` subdoc is written for every native
+     `User.create` (inline schema, no default), and `{}` is truthy →
+     2a refused every export with `owner missing/mirror`. The
+     `owner.federation` presence check was replaced with
+     `owner.federation.origin` (populated on every mirror-row create,
+     absent on every native incl. legacy); `ProjectCreationGuard`
+     (already origin-keyed) is the canonical mark.
 - **RESOLVED in 2a (was open question):** git PAT expiry —
   git-bridge **DOES enforce `expiresAt`** on PATs: `GitBridgePATManager.getUserId`
   filters `expiresAt: { $gt: now }` when looking up a raw PAT

@@ -107,12 +107,24 @@ export default async function exportProject({ body, callerOrigin }) {
   }
 
   // 4 owner B-native (mirror rows are home-side, 04 §1 — they cannot own
-  //   on B; a suspended owner cannot export).
+  //   on B; a suspended owner cannot export). Mirror mark = the `federation`
+  //   subdocument HAS an `origin` (CallbackRouter always sets `origin`).
+  //   Keying on bare `owner.federation` presence is WRONG: mongoose
+  //   materializes an empty `{}` subdoc on every native `User.create`, so
+  //   `owner.federation` is truthy for ALL native accounts (caught live,
+  //   2d smoke: every export refused "owner missing/mirror").
   const owner = await User.findOne({ _id: project.owner_ref })
     .select('_id federation suspended')
     .lean()
     .catch(() => null)
-  if (!owner || owner.suspended || owner.federation) {
+  // `owner.federation` may be an object (mongoose) or absent; the mirror
+  // mark is a populated `origin` (pairwise home FQDN).
+  const ownerIsMirror =
+    owner &&
+    owner.federation &&
+    typeof owner.federation.origin === 'string' &&
+    owner.federation.origin.length > 0
+  if (!owner || owner.suspended || ownerIsMirror) {
     return { ok: false, code: S2S_ERRORS.PROJECT_NOT_OWNED, detail: 'owner missing/mirror/suspended' }
   }
 
@@ -169,6 +181,7 @@ export default async function exportProject({ body, callerOrigin }) {
       },
       $setOnInsert: { homeOrigin: callerOrigin, createdAt: new Date() },
     },
+    { upsert: true },
   ).catch(error => {
     // Ledger failure must not break a legitimate export (the PAT is
     // valid + short-lived); 2c's sweep is best-effort on top of it.

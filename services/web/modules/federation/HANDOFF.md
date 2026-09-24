@@ -22,7 +22,7 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 | P2 | Admin UI + Settings additions + claim allow-list + rate-limit + audit + institutional TA (P3 pin-time) | **DONE** (rate-limit, audit, admin, claim allow-list via `Redact.CLAIM_LOG_ALLOWLIST`, institutional TA pin-time all shipped + committed) |
 | P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
 | P2-live | Live smoke against real Mongo+Redis+oidc-provider+express (the module, not the mocks) | **DONE** (13 scenarios ALL PASS — see SESSION 10; `tools/live-smoke.mjs`) |
-| **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **IN PROGRESS** (**2a SHIPPED** — SESSION 12; **2b SHIPPED** — SESSION 13; **2c SHIPPED** — SESSION 14; **2d IN PROGRESS** — this section, bottom of file) |
+| **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **DONE** (**2a SHIPPED** — SESSION 12; **2b SHIPPED** — SESSION 13; **2c SHIPPED** — SESSION 14; **2d SHIPPED** — SESSION 15; all four steps committed + pushed; eduGAIN Phases 0/2/3/4 remain external-infra-blocked, plan/10) |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -256,7 +256,7 @@ PUBLIC_URL=http://localhost:3000 MONGO_HOST=127.0.0.1 REDIS_HOST=127.0.0.1 \
 
 ## 9. Progress Log
 
-### IN FLIGHT: content-bridge 2d (TODO-0c6f534f) — 2-real-origins live smoke, SESSION 15
+### DONE: content-bridge 2d (TODO-0c6f534f) — 2-real-origins live smoke, SHIPPED SESSION 15
 Goal step 4 of 4 (goal `3dad1c9e`). 2a/2b/2c all committed + pushed
 (`86ead6eb49`/`a56cafbae2`/`1b7a9d4634`/`01ccd0c2b7`/`3e0b5f4ae2`/
 `66d87b3372`). This is the LAST unblocked work item; eduGAIN phases
@@ -1373,62 +1373,68 @@ existing `oauthAccessTokens` collection — VERIFY name first).
     sweep runs on transition (flag-INDEPENDENT, `beta.example` arg);
     idempotent double-revoke → no second sweep.
 - **Lint**: clean on all 2c-touchable 9 files.
-- **OPEN for 2d (Goal `3ea7bb53` step 4 of 4)**: two-real-origins
-  (A≠B) live docker smoke — export wizard + S2S export-project +
-  PAT live-fetch + **push-gets-403** against the deployed git-bridge.
-  The 2c guard is in this repo's Node REST surface
-  (`GitBridgeAuthMiddleware`); 2d verifies end-to-end the Bearer
-  surface (clone `https://git:<PAT>@host/path`) AND the curl-Bearer
-  fallback (wizard documents both).
-- Next: **2d** (live two-real-origins smoke).
+- **OPEN for 2d (Goal `3ea7bb53` step 4 of 4)**: CLOSED in SESSION 15 — 2d
+  SHIPPED (live smoke GREEN; see the SESSION 15 section +
+  `tools/two-origin/README.md`).
+- Next: eduGAIN Phase 0+ (only when external infra appears).
 
-# SESSION 15 (2026-09-24): 2d IN PROGRESS — driver + B child WRITTEN (uncommitted; green run outstanding)
-Goal step 4 of 4 (`3dad1c9e`). Recon stays CLOSED (SESSION 14 close-out); this session built the
-smoke files against the closed recon and verified the remaining wire facts in-source (no probe,
-no loop).
+# SESSION 15 (2026-09-24): 2d SHIPPED — two-real-origins live smoke GREEN (Goal `3dad1c9e` step 4 of 4)
+Goal step 4 of 4 (`3dad1c9e`). Recon stayed CLOSED (SESSION 14 close-out); the smoke was
+built against the closed recon and iterated against real live output (2d anti-loop budget:
+failures resolved via live logs + targeted SOURCE reads of the files under test).
 
-**State on disk (UNCOMMITTED — iteration in progress; `tools/two-origin/` is untracked):**
-- `tools/two-origin/live-smoke-b.mjs` (NEW, 123 lines): the B child process — origin
+**SHIPPED (committed + pushed this session):**
+- `tools/two-origin/live-smoke-b.mjs` (NEW): the B child process — origin
 `beta.example`, REAL express mount (S2sRouter + bridge + CallbackRouter + OP) +
-`GitBridgeRouter.apply(webRouter, privateApiRouter, publicApiRouter)` (private + public routers
-mounted; `webRouter` stub router), fake login = B-native `owner@beta.example` (real shared-Mongo
-row), `Settings.federation.enabled=true` + `export.enabled=true` + `sweepOnRevoke=true`,
-prints `READY_B <port>` once listening, stays up until the driver SIGTERMs it.
-- `tools/two-origin/live-two-origin.mjs` (NEW, 696 lines): the driver IS A (origin
-`alpha.example`; A is RP-only this flow, no second admin surface). Owns the shared Mongo
-(`fedsmoke2`: drop + reseed — carol@alpha + owner@beta, projects projA + bProject, peer rows both
-origins approved/both pinned to the shared bootstrap key), spawns the B child, rewrites
-`fetch(https://<origin>)` → local ports (both origins), mounts its own express (fake login
-carol, S2sRouter + CallbackRouter + OP), drives 7 scenarios (01 dance → mirror + consent-grant
-account index, 02 wizard → S2S export-project → PAT, 03 live REST read-400/write-403/token-info
-200 with the export PAT + normal PAT passes guard, 04 429 rate limit, 05 S2S revoke → sweep,
-06 dead-PAT 401s + wizard 502, 07 post-revoke S2S 401 peer-not-approved) with a PASS/FAIL matrix
-+ exit code.
-- `invite/FederatedExportController.mjs` (+13 lines): `export const FederatedExportController =
-{handleExportFormGet, handleExport}` + `export default` — the house pattern (mirror
-`FederatedInviteController`); `FederatedExportRouter` default-imports the handler object, a
-named-only module would be `undefined` at `router.apply` (app boot).
+`GitBridgeRouter.apply(webRouter, privateApiRouter, publicApiRouter)`, fake login =
+B-native `owner@beta.example` (real shared-Mongo row), prints `READY_B <port>`.
+- `tools/two-origin/live-two-origin.mjs` (NEW, driver = origin A `alpha.example`,
+RP-only): owns shared Mongo `fedsmoke2` (drop + reseed — carol@alpha + owner@beta,
+projects, peer rows both origins approved/both pinned to the shared bootstrap key) +
+Redis (`flushall`), spawns B, fetch-rewrites both origins, drives 7 scenarios (01 dance
+→ mirror + consent-grant account index, 02 wizard → S2S mint → PAT, 03 live REST
+read-400/write-403/token-info-200 + normal-PAT-passes-guard, 04 429 rate limit,
+05 S2S revoke → sweep, 06 dead-PAT 401s + wizard 502, 07 post-revoke S2S 401) with
+a PASS/FAIL matrix + exit code.
+- `tools/two-origin/README.md` (NEW): run instructions + scenario matrix + the
+documented shared-keystore / fake-login / one-process-per-origin simplifications.
+- **Two PRODUCTION bugs caught live (SESSION 10 class — the unit suite, incl. the
+vi.mocked `FederationExportGrant`, could never reach them) — fixed + regression-tested:**
+  1. **2a ledger upsert was a silent no-op** (`exportProject.mjs`):
+     `FederationExportGrant.updateOne(filter, { $set, $setOnInsert })` was called
+     WITHOUT `{ upsert: true }` → `$setOnInsert` never applied, `matched 0/upserted 0`,
+     NO ledger row ever persisted → 2c sweep had nothing to sweep + 2a's ledger
+     guarantee silently unmet. Fix: `{ upsert: true }`. Test: exportProject
+     idempotent case now asserts `opts === { upsert: true }`.
+  2. **mirror mark = `owner.federation.origin`, NOT bare subdoc presence**
+     (`exportProject.mjs`): mongoose writes a populated EMPTY `{}` `federation`
+     subdoc on every native `User.create` (inline schema), and `{}` is truthy →
+     2a refused every export with `owner missing/mirror`. Fix: the owner check
+     keys on a populated `federation.origin` (present on every mirror-row create
+     per CallbackRouter, absent on every native incl. legacy). `User.mjs`
+     untouched (minimal prod-model diff). Test: new exportProject case
+     "empty federation subdoc is NOT a mirror → exported".
+  Both fixed under `exportProject.mjs`; 184/184 unit (178 fed + 6 git-bridge)
+  green; Lint clean on all 2d-touched files (exportProject.mjs,
+  FederatedExportController.mjs, both two-origin .mjs, both test files).
+- `invite/FederatedExportController.mjs`: house pattern `export const
+  FederatedExportController = {...}` + `export default` (mirror
+  `FederatedInviteController`) — `FederatedExportRouter` default-imports
+  the handler object at `router.apply` (a named-only module would be `undefined`
+  at app boot). (Committed `cf4b29c813` earlier this session.)
 
-**Remaining (nothing else — recon closed, no re-reads needed):**
-1. `driveDance(authUrl)` in the driver is still a stub (returns `{code: null, ...}`). Implement it
-as the proven `tools/live-smoke.mjs` L216–269 loop: cookie jar on `getSetCookie`, follow 3xx,
-`consent-form` detect → POST `/federation/oidc/interact/<i>/consent`, abort + return
-`{code, state, cookies}` at A's `/federation/oidc/rp/callback?code&state` (do NOT follow the
-callback — the scenario fetches it with the dance cookies). Base URLs → `betaBase`.
-2. Run from `services/web/` with the containers up (`fed-smoke-mongo` 27107 + `fed-smoke-redis`
-6380): `timeout 240 node modules/federation/tools/two-origin/live-two-origin.mjs`. Iterate to
-all-PASS (expect the usual suspects: B OP 500s on first mount = adapter/provider env, not
-auth-flow bugs — SESSION 10 precedent).
-3. Then: `tools/two-origin/README.md` (run instructions + scenario matrix + the shared-keystore
-simplification noted), commit explicit paths (both `.mjs` + README + HANDOFF + the
-`FederatedExportController` export), then flip 2d SHIPPED + Goal `3dad1c9e` audit.
+**Live evidence (exit 0, `7 scenarios · ALL PASS`, 30/30 checks)** —
+`timeout 240 node modules/federation/tools/two-origin/live-two-origin.mjs` from
+`services/web/` with `fed-smoke-mongo` (27107) + `fed-smoke-redis` (6380) up. The
+2d signature is scenario 03: export-PAT `GET /api/v0/docs/<id>` reaches the
+controller (400 = absent project-history sidecar, auth passed), export-PAT
+`POST /api/v0/docs/<id>/snapshots` → **403 (the 2c guard)**, normal-PAT write
+PASSES the guard (500, same sidecar) → scope-keyed, not a blanket refusal.
+Scenario 06 proves the post-revoke dead-PAT story (401 token-info/read/write +
+wizard 502 `peer-not-approved`).
 
-**Wire facts verified in-source this session (do NOT re-verify):** S2S 429 = `429 +
-Allow-Retry-After` + `{ok:false, code:'rate-limited'}` (router L159–165); export S2S payload
-`{git_url, pat, expires_at}` (snake_case) with raw PAT never persisted (sha256 + `olp_` 8-char
-prefix, `scope: 'federation:git_bridge'`); ledger upsert `{owner, projectId, homeOrigin}` →
-`status:'exported'`; sweep = per-row `deleteOne({_id: patId, scope: EXPORT_SCOPE})` + ledger
-`status:'revoked'` (scope-guarded, best-effort); 403 guard keys on `identity.scope.startsWith(
-'federation:')` at `ensureTokenProjectAccess('write')` before any oracle/403-via-oracle; peer
-gate 401 `peer-not-approved` when `peer.status !== 'approved'`; audit ops
-`federation_export_requested/denied/swept` exist in `Audit.mjs` (PAT never in audit meta).
+**What this closes:** Goal `3dad1c9e-...` step 4 of 4 (content-bridge v2
+complete — 2a+2b+2c+2d). `TODO-0c6f534f` DONE. eduGAIN Phases 0/2/3/4
+STAY blocked on external Shibboleth/eduGAIN infra (plan/10) — the goal's
+eduGAIN leg is NOT closed by 2d. Next (if infra appears): eduGAIN
+Phase 0 (Shibboleth SP proxy on A).

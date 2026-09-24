@@ -85,8 +85,8 @@ vi.mock('../../../../../app/src/models/User.mjs', () => ({
 
 vi.mock('../../../app/models/FederationExportGrant.mjs', () => ({
   FederationExportGrant: {
-    updateOne: (filter, update) => {
-      globalThis.__ledgerWrites.push({ filter, update })
+    updateOne: (filter, update, opts) => {
+      globalThis.__ledgerWrites.push({ filter, update, opts })
       return Promise.resolve({})
     },
   },
@@ -245,6 +245,24 @@ describe('export-project (B-side, plan 09 §2)', () => {
     expect(globalThis.__patDocs).toHaveLength(0)
   })
 
+  // Mongoose materializes a POPULATED EMPTY `{}` subdoc on native
+  // `User.create` (no default, inline schema) — it is still `owner.federation`
+  // truthy, so the mirror mark has to be `federation.origin`, NOT bare
+  // subdoc presence (caught live, 2d smoke: 2a refused every export
+  // "owner missing/mirror").
+  it('owner with an EMPTY federation subdoc (native mongoose create) is NOT a mirror → exported', async () => {
+    nativeOwner()
+    seedLiveGrant()
+    globalThis.__userOneFn = () => ({
+      _id: OWNER,
+      federation: {},
+      suspended: false,
+    })
+    const res = await exportProject({ body: { payload: { projectId: PROJECT } }, callerOrigin: CALLER })
+    expect(res.ok).toBe(true)
+    expect(globalThis.__patDocs).toHaveLength(1)
+  })
+
   it('owner suspended → project-not-owned', async () => {
     nativeOwner()
     seedLiveGrant()
@@ -301,6 +319,10 @@ describe('export-project (B-side, plan 09 §2)', () => {
     for (const w of globalThis.__ledgerWrites) {
       expect(w.filter).toMatchObject({ owner: OWNER, projectId: PROJECT, homeOrigin: CALLER })
       expect(w.update.$set.status).toBe('exported')
+      // `upsert: true` is mandatory — without it `updateOne` is a no-op
+      // (the `$setOnInsert` never applies and no ledger row exists for
+      // 2c to sweep; caught live, 2d smoke).
+      expect(w.opts).toEqual({ upsert: true })
     }
   })
 
