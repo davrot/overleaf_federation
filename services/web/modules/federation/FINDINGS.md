@@ -346,3 +346,92 @@ window when the peer row carries `killOutstandingCodes: true` (04 §5,
 peer row in `app/models/FederationPeer.mjs`; enforced in
 `s2s/actions/revoke.mjs` + `FederationAdminController.handleRevoke`
 via `oidc/RedisOidcProviderAdapter.revokeClientCodes`, best-effort).
+
+---
+
+## eduGAIN interop — Phase 4 closure (SESSION 18, 2026-09-25)
+
+Three Phase 4 items closed (plan/10 §3 "Phase 4 — Hardening"):
+
+### 4.1 Cert-expiry alerts (our SP cert + SAML IdP/proxy cert) → ops runbook
+
+Code: `modules/authentication/ssoCertExpiry.mjs` (pure + one boot sweep).
+`extractCertificates` / `certExpiryInfo` / `parseCertExpiry` parse X.509
+notAfter from any PEM text (node `X509Certificate` — no new dep).
+`sweepSsoCertExpiry()` runs at boot from the saml-authentication module
+`start()` (mounted only when SAML is enabled):
+
+- `sp-metadata:publicCert` — our SP metadata signing cert (inline PEM, plan
+  11, admin tab "SAML Metadata").
+- `saml-env:OVERLEAF_SAML_IDP_CERT` — env-mode IdP cert path.
+- `saml-provider:<id>:<issuer>` — each enabled SAML provider `idpCert` path
+  (the IdP/proxy signing cert we trust; for eduGAIN, the proxy's cert).
+
+Warning window: `SSO_CERT_EXPIRY_WARN_DAYS` env (default 30d), per-cert
+`logger.warn('sso cert expiry: …')` on expiry/within-window; unreadable
+certs are `{ label, error }` rows (never throws — rotation is operator work,
+boot must not fail). **Ops alerting = subscribe to the `sso cert expiry:`
+log lines** (e.g. `journalctl -u | grep 'sso cert expiry'` /
+`docker logs | grep 'sso cert expiry'`).
+
+**Rotation runbook (the "proxy cert → SSO admin → test → no restart" flow,
+plan/10 §3 Phase 2 checkbox):**
+1. New cert PEM arrives (DfN test IdP metadata re-signed, or our own
+   re-issued).
+2. SSO admin → SAML provider row → paste cert into `idpCert` path OR SAML
+   Metadata tab → save. No restart needed: strategy is (re)registered
+   lazily via `SAMLModuleManager.ensureStrategy` / `_evictProvider` on edit
+   (SESSION 16 lazy-registration), and the boot sweep re-reads the same
+   rows next boot.
+3. SSO admin "Test provider" → re-fetch metadata URL + verify + extract
+   (Phase 2 G3 — still a manual fetch today; the test endpoint is
+   reachability-only, see residual below).
+4. Confirm log: `sso cert expiry: sweep done` + no `sso cert expiry: …
+   EXPIRED` line.
+
+**eduGAIN = proxy SAML + GEANT OIDC via SSO admin; OIDF peer track
+unaffected; N-provider extension in place** (Phase 4 checklist, verbatim
+item): SAML provider(s) + OIDC provider(s) are admin-configured
+N-providers (P1b); the OIDF federation module (peer track) is a separate
+OIDC provider stack on `/federation/oidc` and is not touched by SSO
+certs — the sweep above covers only SSO-side certs.
+
+### 4.2 No-cross-linking audit (externalAuth='saml'/'oidc' vs OIDF users)
+
+Verified (no code change; the two tracks are structurally disjoint):
+
+- **Stock SSO login** (SAML + OIDC providers) sets `user.externalAuth =
+  'saml' | 'oidc'` (`SAMLAuthenticationController.mjs:137`,
+  `OIDCAuthenticationController.mjs:57`) and records the provider account
+  in `User.thirdPartyIdentities` via `AuthenticationManager.linkAccount`
+  (explicit `_doLink` flow).
+- **OIDF federation login** resolves the logged-in B-side user from the
+  SESSION only (`bridge.finishLogin` →
+  `SessionManager.getLoggedInUserId(req.session)`) and does the
+  oidc-provider interaction `login:{accountId: <User._id>}`. It writes no
+  `thirdPartyIdentities`, no `externalAuth` — it rides whatever auth track
+  the user logged in with.
+- **No shared identity store**: the OIDF bridge has no
+  `thirdPartyIdentities`/`linkAccount` write (grep-verified: none in
+  `modules/federation`), and the SSO admin's OIDF endpoints (federation
+  module) never touch SSO-provider `thirdPartyIdentities`. A user who
+  logs in via the eduGAIN proxy (externalAuth='saml') and later via the
+  GEANT OIDC test IdP (externalAuth='oidc') are two
+  `thirdPartyIdentities` entries on the SAME User (linked explicitly via
+  `_doLink`) — no silent cross-track merge, no OIDF account auto-linked to
+  an SSO user.
+- **Implication**: a person with BOTH a proxy-SAML login and a GEANT-OIDC
+  login must link their two accounts explicitly (the stock link flow);
+  there is no automatic bridge between the identity providers and the
+  OIDF federation stack. This is the desired "no cross-linking" state.
+
+### Residual (not closed, recorded)
+
+- SSO admin test endpoint (`/admin/sso/test/provider/:providerId`) for
+  SAML is reachability-only (HTTP status). The Phase 2 G3 "fetch metadata
+  URL, verify signature, extract cert" remains manual until
+  G3 is implemented (xml-crypto + xml2js are already direct deps, but
+  the signature-verification path against a fetched SP/IdP metadata is
+  not yet wired into the endpoint).
+- OIDF key rotation (INFO, SESSION 9) is a 501 stub (provider memo frozen;
+  rotation requires restart) — unchanged.

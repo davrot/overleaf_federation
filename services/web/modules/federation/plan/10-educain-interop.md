@@ -416,11 +416,9 @@ App changes, discrete commits pushed:
 - [ ] Production promotion checklist (form, CoC/Sirtfi/R&S, jurisdiction).
 
 ### Phase 4 — Hardening
-- [ ] Cert-expiry alerts (our SP cert, proxy cert) → ops runbook.
-- [ ] `FINDINGS.md`/`HANDOFF.md`: "eduGAIN = proxy SAML + GEANT OIDC via SSO
-  admin; OIDF peer track unaffected; N-provider extension in place."
-- [ ] Audit: `externalAuth='saml'` / `='oidc'` vs federation OIDF users — no
-  cross-linking (stock `_doLink` flow is explicit).
+- [x] Cert-expiry alerts (our SP cert, proxy cert) → ops runbook. **DONE (SESSION 18)**: `modules/authentication/ssoCertExpiry.mjs` (pure X.509 notAfter parse + boot-time sweep over `ssoConfigs.spMetadata.publicCert` inline + SAML provider `idpCert` paths + env path) wired into saml-authentication module `start()`; `SSO_CERT_EXPIRY_WARN_DAYS` env (default 30d) → `logger.warn 'sso cert expiry: …'` on expiry/within-window/unreadable (never throws). Runbook + alerting in FINDINGS.md §"eduGAIN interop — Phase 4 closure". 17 test cases (`test/unit/certExpiry.test.mjs`, openssl-generated certs). Residual: SAML test endpoint still reachability-only (G3 fetch+verify+extract manual — see FINDINGS residual).
+- [x] `FINDINGS.md`/`HANDOFF.md`: "eduGAIN = proxy SAML + GEANT OIDC via SSO admin; OIDF peer track unaffected; N-provider extension in place." **DONE (SESSION 18)** — FINDINGS.md Phase-4 closure section (verbatim statement + rationale).
+- [x] Audit: `externalAuth='saml'` / `='oidc'` vs federation OIDF users — no cross-linking (stock `_doLink` flow is explicit). **DONE (SESSION 18, audit, no code)**: OIDF bridge resolves the B-side user from SESSION only (`bridge.finishLogin` → `SessionManager.getLoggedInUserId`), writes no `thirdPartyIdentities`/`externalAuth`; stock SSO login writes those via `linkAccount` (explicit `_doLink`). The two tracks are structurally disjoint — a proxy-SAML login and a GEANT-OIDC login land as two explicitly-linked 3PIs on one User, never auto-merged. Verdict recorded in FINDINGS.md §4.2.
 
 ## 4 — Code delta (v3)
 
