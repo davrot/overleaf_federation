@@ -23,6 +23,7 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 | P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
 | P2-live | Live smoke against real Mongo+Redis+oidc-provider+express (the module, not the mocks) | **DONE** (13 scenarios ALL PASS — see SESSION 10; `tools/live-smoke.mjs`) |
 | **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **DONE** (**2a SHIPPED** — SESSION 12; **2b SHIPPED** — SESSION 13; **2c SHIPPED** — SESSION 14; **2d SHIPPED** — SESSION 15; all four steps committed + pushed; eduGAIN Phases 0/2/3/4 remain external-infra-blocked, plan/10) |
+| **V1-SSO** | **eduGAIN/DFN-AAI (SAML) + GEANT AAI (OIDC) SSO interop (plan/10): P1a framework port, P1b N-provider, P1c per-provider attrFilter, R1 synthetic-email JIT** | **SHIPPED** (P1a `0afb9048be`; P1b `90baca21f7`/`157eea5ec5`; P1c `8a99c05e79`; **R1 — SESSION 16**). Phases 0/2/3/4 remain **BLOCKED** on external Shibboleth-SP / DFN test IdP / GEANT Sandbox infra (plan/10) |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -1438,3 +1439,43 @@ complete — 2a+2b+2c+2d). `TODO-0c6f534f` DONE. eduGAIN Phases 0/2/3/4
 STAY blocked on external Shibboleth/eduGAIN infra (plan/10) — the goal's
 eduGAIN leg is NOT closed by 2d. Next (if infra appears): eduGAIN
 Phase 0 (Shibboleth SP proxy on A).
+
+# SESSION 16 (2026-09-24): R1 synthetic-email JIT SHIPPED (plan/10 Phase 2 app-side — the last in-repo deliverable of the SSO leg)
+Goal `3dad1c9e`, SSO track leg. Plan/10 Phase 2 item "[ ] R1 synthetic-email JIT
+(SAML + OIDC managers, env-gated)" → **SHIPPED** (discrete commit). Everything else
+in Phase 0/2/3 stays external-infra-blocked (Shibboleth SP / DFN test IdP / GEANT
+Sandbox registration) — that requires a live proxy to talk to; the app-side code
+those flows depend on is now complete.
+
+**Change (the whole delta):**
+- `modules/authentication/saml/app/src/SAMLAuthenticationManager.mjs`: the email
+  extraction block now JITs `<userpart>@<domain>` when `profile[attEmail]` is
+  absent (or empty) and the identity anchor (`profile[attUserId]`, eppn/nameID)
+  is present. `domain` = `OVERLEAF_SAML_SYNTHETIC_EMAIL_DOMAIN` env knob,
+  else `new URL(Settings.siteUrl).host`. Both the `createNewUser` init and the
+  `samlIdentifiers.0` link `$set` carry `syntheticEmail: true`. No anchor AND no
+  email → throw (a SAML login without an anchor is a misconfiguration).
+- `modules/authentication/oidc/app/src/OIDCAuthenticationManager.mjs`: mirror of
+  the above for the `email` CLAIM (GEANT `email` is OPTIONAL, plan/10 §2.5).
+  Anchor = `profile.id` (`sub` — persistent per eduGAIN/GEANT, R1 spec). Flag
+  travels on `oidcUserData = { syntheticEmail: true }` → merged into the
+  thirdPartyIdentifier `externalData` at link time (existing
+  `ThirdPartyIdentityManager.link` mechanism — no model change).
+- `modules/authentication/test/unit/r1SyntheticEmail.test.mjs` (NEW, 8 cases):
+  SAML real-email-no-op / JIT+flag / env override / no-anchor throw; OIDC
+  same 4. Follows the mock-thunk house pattern (vi.resetAllMocks in
+  bootstrap).
+- `modules/federation/plan/10-educain-interop.md`: Phase 2 R1 bullet → SHIPPED
+  (SESSION 16), code-delta table unchanged-est.
+
+**Live evidence (exit 0):** `vitest run modules/authentication modules/git-bridge modules/federation`
+→ 198/198 (1.7s). ESLint clean on the 4 touched files. (No docker/live-smoke
+needed: the change is a pure-function email resolution + one identifier field,
+end-to-end behavior (SAML manager → User row → identifier) is exercised by the
+8 cases against a mocked User.)
+
+**What this does NOT close:** plan/10 Phase 0 (Shibboleth proxy), Phase 2 live
+(DFN test IdP login), Phase 3 (GEANT Sandbox registration + flow), Phase 4
+(cert-expiry runbook) — all require the external proxy/IdP env to exist. They
+remain external-infra-blocked as of this session. The goal's SSO leg now has
+ZERO remaining app-side work.

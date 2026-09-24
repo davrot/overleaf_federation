@@ -381,7 +381,14 @@ App changes, discrete commits pushed:
   (our `/saml/meta`).
 
 ### Phase 2 — eduGAIN SAML via proxy (app-side + live)
-- [ ] **R1 synthetic-email JIT** (SAML + OIDC managers, env-gated):
+- [x] **R1 synthetic-email JIT** (SAML + OIDC managers, env-gated) — SHIPPED
+  (SESSION 16): SAML + OIDC managers JIT `<userpart>@<domain>` when the
+  email is absent and the anchor (eppn / `sub`) is present; SAML flag
+  `samlIdentifiers[0].syntheticEmail: true`, OIDC flag merged into the
+  thirdPartyIdentifier `externalData` `{ syntheticEmail: true }`; env knobs
+  `OVERLEAF_SAML_SYNTHETIC_EMAIL_DOMAIN` / `OVERLEAF_OIDC_SYNTHETIC_EMAIL_DOMAIN`
+  (default: `Settings.siteUrl` host); no-anchor + no-email → throw. Tests:
+  `modules/authentication/test/unit/r1SyntheticEmail.test.mjs` (8 cases).
   - SAML: `profile[attEmail]` absent + eppn scope present → synth
     `<eppn-userpart>@<OVERLEAF_SAML_SYNTHETIC_EMAIL_DOMAIN>` (default: our
     `siteUrl` host), flag synthetic (e.g. `samlIdentifiers[0].syntheticEmail:

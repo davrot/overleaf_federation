@@ -44,9 +44,28 @@ const SAMLAuthenticationManager = {
       updateUserDetailsOnLogin,
     } = cfg
     const externalUserId = profile[attUserId]
-    const email = Array.isArray(profile[attEmail])
-                    ? profile[attEmail][0].toLowerCase()
-                    : profile[attEmail].toLowerCase()
+    // R1 (plan 10 §3 Phase 2): eduGAIN/DFN + GEANT IdPs do NOT guarantee an
+    // `email` attribute. When absent but the identity anchor (eppn/nameID) is
+    // present, JIT a synthetic `<userpart>@<domain>` and flag it so the
+    // identifier can be distinguished from a real email. Domain = env
+    // OVERLEAF_SAML_SYNTHETIC_EMAIL_DOMAIN or this origin's siteUrl host.
+    const emailRaw = Array.isArray(profile[attEmail])
+      ? profile[attEmail][0]
+      : profile[attEmail]
+    let email
+    let syntheticEmail = false
+    if (emailRaw && String(emailRaw).trim() !== '') {
+      email = String(emailRaw).toLowerCase()
+    } else {
+      const userpart = externalUserId ? String(externalUserId).split('@')[0].trim() : ''
+      if (!userpart) {
+        throw new Error(`SAML login (provider ${samlProviderId}): no email attribute and no eppn/nameID to JIT from`)
+      }
+      const domain = process.env.OVERLEAF_SAML_SYNTHETIC_EMAIL_DOMAIN
+        || new URL(Settings.siteUrl).host
+      email = `${userpart}@${domain}`
+      syntheticEmail = true
+    }
     const firstName = attFirstName ? profile[attFirstName] : ""
     const lastName  = attLastName  ? profile[attLastName] : email
     let isAdmin = false
@@ -69,23 +88,27 @@ const SAMLAuthenticationManager = {
             last_name: lastName,
             isAdmin: isAdmin,
             holdingAccount: false,
-            samlIdentifiers: [{ providerId: samlProviderId }],
+            samlIdentifiers: [{
+              providerId: samlProviderId,
+              ...(syntheticEmail ? { syntheticEmail: true } : {}),
+            }],
             analyticsId: crypto.randomUUID(),
           }
         )
       }
       // cannot use SAMLIdentityManager.linkAccounts because affilations service is not there
+      const setOps = {
+        'emails.0.confirmedAt': Date.now(), //email of saml user is confirmed
+        'emails.0.samlProviderId': samlProviderId,
+        'samlIdentifiers.0.providerId': samlProviderId,
+        'samlIdentifiers.0.externalUserId': externalUserId,
+        'samlIdentifiers.0.userIdAttribute': attUserId,
+      }
+      // R1: flag synthetic-email identifiers (absent = real email).
+      if (syntheticEmail) setOps['samlIdentifiers.0.syntheticEmail'] = true
       await User.updateOne(
         { _id: user._id },
-        {
-          $set : {
-           'emails.0.confirmedAt': Date.now(), //email of saml user is confirmed
-           'emails.0.samlProviderId': samlProviderId,
-           'samlIdentifiers.0.providerId': samlProviderId,
-           'samlIdentifiers.0.externalUserId': externalUserId,
-           'samlIdentifiers.0.userIdAttribute': attUserId,
-          },
-        }
+        { $set: setOps }
       ).exec()
     }
     // We only want to update the user if the user is a SAML user

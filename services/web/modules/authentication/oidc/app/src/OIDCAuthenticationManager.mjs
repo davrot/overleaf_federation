@@ -34,7 +34,30 @@ const OIDCAuthenticationManager = {
     const linkProviderId = isDbProvider
       ? (provider.providerID || providerId)
       : (providerId || envCfg?.providerId || envCfg?._firstProviderId || 'oidc')
-    const email = profile.emails[0].value
+    // R1 (plan 10 §3 Phase 2): GEANT AAI OIDC — the `email` claim is OPTIONAL
+    // (eduTEAMS may omit it). When absent but the persistent `sub` anchor is
+    // present, JIT a synthetic `<sub>@<domain>` and flag it. Domain = env
+    // OVERLEAF_OIDC_SYNTHETIC_EMAIL_DOMAIN or this origin's siteUrl host.
+    // `sub` (= profile.id) is the persistent unique anchor, so the synthetic
+    // address is stable per external account.
+    const rawEmail = profile.emails?.[0]?.value
+    let syntheticOIDCEmail = false
+    let email
+    if (rawEmail && String(rawEmail).trim() !== '') {
+      email = String(rawEmail).toLowerCase()
+    } else {
+      const sub = profile.id
+      const userpart = sub ? String(sub).split('@')[0].trim() : ''
+      if (!userpart) {
+        throw new Error(
+          `OIDC login (provider ${linkProviderId}): no email claim and no sub to JIT a synthetic email from`
+        )
+      }
+      const domain = process.env.OVERLEAF_OIDC_SYNTHETIC_EMAIL_DOMAIN
+        || new URL(Settings.siteUrl).host
+      email = `${userpart}@${domain}`
+      syntheticOIDCEmail = true
+    }
     const oidcUserId = (attUserId === 'email') ? email : profile[attUserId]
     const firstName = profile.name?.givenName || ""
     const lastName  = profile.name?.familyName || ""
@@ -47,7 +70,9 @@ const OIDCAuthenticationManager = {
         isAdmin = (adminClaim === valAdmin)
       }
     }
-    const oidcUserData = null // Possibly it can be used later
+    const oidcUserData = syntheticOIDCEmail
+      ? { syntheticEmail: true }
+      : null // Possibly it can be used later; R1 flag merged into the identifier
     let user
     try {
       user = await ThirdPartyIdentityManager.promises.login(linkProviderId, oidcUserId, oidcUserData)
