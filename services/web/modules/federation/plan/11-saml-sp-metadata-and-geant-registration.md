@@ -126,29 +126,41 @@ params = {
 - The strategy (IdP direction) is **untouched**: `buildStrategyOptions`/
   `ensureStrategy` unchanged. This endpoint is **SP metadata** only.
 
-### 2.2 `ssoConfigs.spMetadata` (raw doc, no migration)
+### 2.2 `ssoConfigs.spMetadata` (raw doc, no migration) — FINAL model (SESSION 17 recon)
+Empirical result of the v5 signing seam (node-saml v5.1.0, this session):
+- `signMetadata: true` + `privateKey` alone **throws** (`Missing publicCert`);
+  `publicCerts` alone (no `signMetadata`) emits **no** `KeyDescriptor`;
+  `privateKey + publicCerts + signatureAlgorithm: 'sha256'` → signed metadata
+  + `<KeyDescriptor use="signing">` (the **cert**, not the key, is what the
+  registry sees). `signatureAlgorithm: 'sha256'` shorthand accepted by the
+  bundled `xml-crypto`.
+So the SP keypair model is 2 fields (key + cert), mirroring the IdP-direction
+provider fields, and signing is **IFF both** are present:
 ```jsonc
-spMetadata: {                 // new subdoc on the same 'sso-settings' doc
-  spEntityId:     string,     // optional; default = siteUrl origin + '/saml'
+spMetadata: {                  // new subdoc on the same 'sso-settings' doc
+  spEntityId:     string,      // optional; default = siteUrl origin + '/saml'
   organization:   { name, displayName, url },   // required for registries
   contacts:       [ { contactType: 'technical', email }, ... ],
-  privateKey?:    string,     // PEM — **masked** in all admin GET responses
-                              //   presence ⇒ signMetadata (no separate flag)
+  privateKey:     string,      // PEM PRIVATE KEY — **masked** in admin GETs
+  publicCert:     string,      // PEM CERT (registry-facing half) — **masked**
+  // signing rule: privateKey && publicCert  =>  signMetadata + sha256
 }
 ```
-Admin: one PUT `spMetadata` route in the SSO admin module
-(`SSOAdminController` — add `saveSAMLSPMetadata` + `testMetadata` (re-emit
-XML for eyeballing before submission)). GET read: masked (reuse the existing
-provider-masking path in the admin router).
+**Route simplification (SESSION 17 final):** no new routes — `spMetadata` is a
+subdoc of the `sso-settings` doc, so the EXISTING `GET`/`POST /admin/sso/config`
+pair transports it: `_maskConfig` masks `spMetadata.privateKey`+
+`publicCert`; `_sanitizeConfig` restores masked values on save (`_id: SSO_CONFIG_ID`
++ the `••••••••` sentinel — the existing pattern). The pug gets an SP-metadata
+form section. Zero new router entries.
 
 ### 2.3 What changes, what doesn't
 | Change | File | Notes |
 |---|---|---|
-| SP metadata generation (v3 params) | `authentication/saml/app/src/SAMLAuthenticationController.mjs` | rewrite `getSPMetadata`: call the v5 **direct** `@node-saml/node-saml` `generateServiceProviderMetadata(params)` (synchronous, returns string) — own SP entityID, `metadataOrganization` + `metadataContactPerson`, `signMetadata: true` + `privateKey` (PEM) when present, `Content-Type: application/saml-metadata+xml`; graceful “SAML not enabled” response; keep route path `/saml/meta` |
+| SP metadata generation (v3 params) | `authentication/saml/app/src/SAMLAuthenticationController.mjs` | rewrite `getSPMetadata`: call the v5 `generateServiceProviderMetadata(params)` **(import from `@node-saml/passport-saml`, already a direct dep — it re-exports the node-saml standalone fn)** (synchronous, returns string) — own SP entityID, `metadataOrganization` + `metadataContactPerson`, signing IFF `privateKey && publicCert` → `signMetadata` + `publicCerts:[cert]` + `signatureAlgorithm:'sha256'`, `Content-Type: application/saml-metadata+xml`; graceful “SAML not enabled” 404; keep route path `/saml/meta` |
 | Content-Type | same | `application/saml-metadata+xml` |
-| SP metadata config + admin route | `authentication/admin/...` (SSOAdminController + Router + pug row) | PUT `spMetadata`, masked GET |
+| SP metadata masking | `authentication/admin/app/src/SSOAdminController.mjs` | `_maskConfig` adds `spMetadata.privateKey`+`publicCert` masking; `_sanitizeConfig` restores masked values on save (**no new route**); pug: SP-metadata form section |
 | No change | `buildStrategyOptions`, login dispatch, federation module (00–09), migrations, env defaults | IdP direction and OIDF stay byte-identical |
-| New (tests) | `authentication/test/` metadata unit test (own entityID; org+contacts present; signed when key; unsigned fallback) + admin route test | |
+| New (tests) | `authentication/test/unit/spMetadata.test.mjs` | metadata gen (own entityID; org+contacts present; signed-when-key pair; unsigned fallback; SAML-disabled 404) + mask/restore unit tests |
 
 No new SSOConfig schema fields (loader is raw `db.ssoConfigs`). No env keys.
 

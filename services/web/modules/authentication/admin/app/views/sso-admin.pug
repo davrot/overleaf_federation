@@ -42,6 +42,15 @@ block content
 										i.fa.fa-key.me-1 
 										|  SSO Providers
 							
+								li.nav-item
+									a.nav-link(
+										data-bs-toggle='tab'
+										href='#tab-saml-meta'
+										role='tab'
+									)
+										i.fa.fa-file-shield.me-1 
+										| SAML Metadata
+								
 							//- Tab content
 							.tab-content
 
@@ -256,6 +265,46 @@ block content
 										i.fa.fa-key.fa-3x.d-block.mb-3
 										| No SSO providers configured yet. Add an OIDC or SAML provider to get started.
 
+								//- ============================================
+								//- SAML SP METADATA TAB (plan 11: GEANT/DFN registration)
+								//- ============================================
+								#tab-saml-meta.tab-pane(role='tabpanel')
+									h5.mb-3 SAML SP Metadata
+									p.text-muted(style='max-width:820px;') Registries (GEANT AAI, eduGAIN, DFN-AAI) fetch our Service Provider metadata at code /saml/meta . Organization + contacts are required; the key pair enables SHA-256 metadata signing. Save, then preview before submitting.
+									.mb-3
+										label.form-label(for='spEntityId')
+											strong SP Entity ID
+									input#spEntityId.form-control(type='text' placeholder='(default: site origin + /saml)')
+									span.form-text.text-muted Stable identifier for this SP. Blank = default (site origin + /saml).
+									.mb-3
+										label.form-label(for='spOrgName')
+											strong Organization Name
+									input#spOrgName.form-control(type='text' placeholder='Overleaf GmbH')
+									.mb-3
+										label.form-label(for='spOrgDisplayName')
+											strong Organization Display Name
+									input#spOrgDisplayName.form-control(type='text' placeholder='Overleaf')
+									.mb-3
+										label.form-label(for='spOrgUrl')
+											strong Organization URL
+									input#spOrgUrl.form-control(type='text' placeholder='https://www.overleaf.com')
+									.mb-3
+										label.form-label(for='spContacts')
+											strong Contact Persons
+									textarea#spContacts.form-control(rows='3' placeholder='technical: it@example.com')
+									span.form-text.text-muted One per line, code type space colon space email . Registries require at least a technical contact.
+									.mb-3
+										label.form-label(for='spPrivateKey')
+											strong Metadata Signing — Private Key (PEM)
+									textarea#spPrivateKey.form-control(rows='5' placeholder='-----BEGIN PRIVATE KEY-----')
+									span.form-text.text-muted Signing applies only when BOTH key and certificate are present (SHA-256). Leave a field empty to keep the stored value.
+									.mb-3
+										label.form-label(for='spPublicCert')
+											strong Metadata Signing — Public Certificate (PEM)
+									textarea#spPublicCert.form-control(rows='5' placeholder='-----BEGIN CERTIFICATE-----')
+									a.btn.btn-link(href='/saml/meta' target='_blank' rel='noopener')
+										i.fa.fa-eye.me-1
+										| Preview /saml/meta (what the registry sees)
 							//- ============================================
 							//- SAVE BUTTON
 							//- ============================================
@@ -690,6 +739,17 @@ block content
 			document.getElementById('ldapContactsNonLdap').value = config.ldap?.contactsNonLdapValue || '';
 			toggleLdapFields();
 			
+			// SAML SP metadata (plan 11)
+			document.getElementById('spEntityId').value = config.spMetadata?.spEntityId || '';
+			document.getElementById('spOrgName').value = config.spMetadata?.organization?.name || '';
+			document.getElementById('spOrgDisplayName').value = config.spMetadata?.organization?.displayName || '';
+			document.getElementById('spOrgUrl').value = config.spMetadata?.organization?.url || '';
+			document.getElementById('spContacts').value = (config.spMetadata?.contacts || []).map(c => (c.contactType || 'technical') + ': ' + c.email).join('\n');
+			document.getElementById('spPrivateKey').value = '';
+			if (config.spMetadata?.privateKey) document.getElementById('spPrivateKey').placeholder = '(unchanged) ••••••••';
+			document.getElementById('spPublicCert').value = '';
+			if (config.spMetadata?.publicCert) document.getElementById('spPublicCert').placeholder = '(unchanged) ••••••••';
+
 			// Providers
 			renderProviders(config.providers || []);
 		}
@@ -740,6 +800,25 @@ block content
 					contactsNonLdapValue: document.getElementById('ldapContactsNonLdap').value.trim(),
 				},
 				providers: gatherProviders(),
+				spMetadata: {
+					spEntityId: document.getElementById('spEntityId').value.trim(),
+					organization: {
+						name: document.getElementById('spOrgName').value.trim(),
+						displayName: document.getElementById('spOrgDisplayName').value.trim(),
+						url: document.getElementById('spOrgUrl').value.trim(),
+					},
+					contacts: document.getElementById('spContacts').value.split('\n').map(l => l.trim()).filter(Boolean)
+						.map(line => {
+							const i = line.indexOf(':')
+							return ({
+								contactType: (i > 0 ? line.substring(0, i).trim() : '') || 'technical',
+								email: i > 0 ? line.substring(i + 1).trim() : line,
+							});
+						})
+						.filter(c => c.email),
+					privateKey: document.getElementById('spPrivateKey').value || (ssoConfig?.spMetadata?.privateKey ? '••••••••' : ''),
+					publicCert: document.getElementById('spPublicCert').value || (ssoConfig?.spMetadata?.publicCert ? '••••••••' : ''),
+				},
 			};
 			return config;
 		}

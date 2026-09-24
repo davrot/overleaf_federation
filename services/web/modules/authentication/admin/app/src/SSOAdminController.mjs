@@ -471,11 +471,16 @@ function _migrateFromEnv() {
 function _maskConfig(config) {
   const masked = JSON.parse(JSON.stringify(config))
   // Mask LDAP sensitive fields
-  if (masked.ldap.bindCredentials) {
+  if (masked.ldap?.bindCredentials) {
     masked.ldap.bindCredentials = '••••••••'
   }
   // Mask provider sensitive fields
-  masked.providers = masked.providers.map(p => _maskProvider(p))
+  masked.providers = (masked.providers || []).map(p => _maskProvider(p))
+  // Mask SAML SP metadata key pair (plan 11 §2.2)
+  if (masked.spMetadata) {
+    if (masked.spMetadata.privateKey) masked.spMetadata.privateKey = '••••••••'
+    if (masked.spMetadata.publicCert) masked.spMetadata.publicCert = '••••••••'
+  }
   return masked
 }
 
@@ -514,6 +519,20 @@ function _sanitizeConfig(newConfig, existing) {
         }
         return p
     })
+  }
+  // SAML SP metadata (plan 11 §2.2): restore masked key pair values on save.
+  // Sentinel with NO stored value ⇒ clear the field (don't persist the sentinel).
+  if (config.spMetadata != null) {
+    const existingSp = existing?.spMetadata || {}
+    for (const field of ['privateKey', 'publicCert']) {
+      if (config.spMetadata[field] === '••••••••') {
+        if (existingSp[field]) {
+          config.spMetadata[field] = existingSp[field]
+        } else {
+          delete config.spMetadata[field]
+        }
+      }
+    }
   }
   return config
 }

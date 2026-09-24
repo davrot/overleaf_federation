@@ -6,9 +6,8 @@ import SAMLAuthenticationManager from './SAMLAuthenticationManager.mjs'
 import SAMLModuleManager from './SAMLModuleManager.mjs'
 import UserController from '../../../../../app/src/Features/User/UserController.mjs'
 import { handleAuthenticateErrors } from '../../../../../app/src/Features/Authentication/AuthenticationErrors.mjs'
-import { xmlResponse } from '../../../../../app/src/infrastructure/Response.mjs'
-import { readFilesContentFromEnv } from '../../../utils.mjs'
-import { getProviderById } from '../../../ssoConfigLoader.mjs'
+import { getProviderById, loadSSOConfig, isSAMLEnabled } from '../../../ssoConfigLoader.mjs'
+import { generateServiceProviderMetadata } from '@node-saml/passport-saml'
 import { evaluateAttrFilter, auditSsoLoginDenied } from '../../../../../app/src/Features/Authentication/ssoRoleEvaluator.mjs'
 
 const SAMLAuthenticationController = {
@@ -179,45 +178,101 @@ const SAMLAuthenticationController = {
       next(err)
     }
   },
+  /**
+   * GET /saml/meta — SAML **Service Provider** metadata for registry
+   * submission (GERANT AAI / eduGAIN / DFN-AAI MDV, plan 11 §2.1).
+   *
+   * This is SP-direction XML (our own entityID + our ACS/SLO URLs) — it is
+   * deliberately NOT derived from a per-IdP strategy (the strategy's
+   * `issuer` is the *IdP's* issuer, plan 11 §1.2 BUG 1/2/4). Registration
+   * config (org/contacts/keys) lives in `ssoConfigs.spMetadata` (masked in
+   * the admin API; no separate route).
+   */
   async getSPMetadata(req, res, next) {
-    // First-enabled provider (env or DB); per-provider meta comes with the
-    // admin test endpoints in Phase 2.
-    const providerId = Settings.saml?._firstProviderId || '1'
     try {
-      await SAMLModuleManager.ensureStrategy(providerId)
-      const strategyId = SAMLModuleManager.strategyIdForProviderId(providerId)
-      const samlStratery = passport._strategy(strategyId)
-      // Cert overrides: DB row for the first-enabled provider (env-mode -> env vars fallback).
-      // The provider is resolved from id; the env synthetic id yields a marker (no DB row).
-      const provider = await getProviderById(providerId)
-      const dbProvider = provider && !provider.__envFallback ? provider : null
-      const decryptionCert = dbProvider?.decryptionCert
-        ? readFilesContentFromEnv(dbProvider.decryptionCert)
-        : readFilesContentFromEnv(process.env.OVERLEAF_SAML_DECRYPTION_CERT)
-      const publicCert = dbProvider?.publicCert
-        ? readFilesContentFromEnv(dbProvider.publicCert)
-        : readFilesContentFromEnv(process.env.OVERLEAF_SAML_PUBLIC_CERT)
-      res.setHeader('Content-Disposition', `attachment; filename="${samlStratery._saml.options.issuer}-meta.xml"`)
-      xmlResponse(res,
-        samlStratery.generateServiceProviderMetadata(
-          {
-            decryptionCert,
-            publicCert
-          },
-          (err, xml) => {
-            if (err) {
-              next(err)
-            } else {
-              res.write(xml)
-              res.end()
-            }
-          }
-        )
-      )
+      const enabled = process.env.EXTERNAL_AUTH?.includes('saml')
+        || (await isSAMLEnabled())
+      if (!enabled) {
+        return res.status(404).send('SAML is not enabled')
+      }
+      const sp = (await loadSSOConfig())?.spMetadata || {}
+      const xml = buildSPMetadataXml(sp, Settings.siteUrl)
+      res.setHeader('Content-Disposition', `attachment; filename="${spFilename(sp, Settings.siteUrl)}"`)
+      res.contentType('application/saml-metadata+xml; charset=utf-8')
+      res.setHeader('X-Content-Type-Options', 'nosniff')
+      return res.send(xml)
     } catch (err) {
+      logger.error({ err }, 'Failed to generate SAML SP metadata')
       next(err)
     }
   },
+}
+
+/**
+ * Build the SP metadata XML (plan 11 §2.1). Exported so the SSO admin
+ * module can re-emit the XML for eyeballing before submission.
+ * Registration config lives in `ssoConfigs.spMetadata`; signed IFF
+ * `privateKey` + `publicCert` are both present (plan 11 §2.2).
+ */
+export function buildSPMetadataXml(sp, siteUrl) {
+  const url_ = String(siteUrl || '').replace(/\/+$/, '')
+  const siteOrigin = new URL(url_).origin
+  const spEntityId = sp?.spEntityId || `${siteOrigin}/saml`
+  const params = {
+    issuer: spEntityId,
+    callbackUrl: `${url_}/saml/login/callback`,
+    logoutCallbackUrl: `${url_}/saml/logout/callback`,
+    identifierFormat: sp?.identifierFormat
+      || 'urn:oasis:names:tc:SAML:1.1:nameidentifier-format:persistent',
+  }
+  if (sp?.organization?.name) {
+    params.metadataOrganization = {
+      OrganizationName: [{ '@xml:lang': 'en', '#text': sp.organization.name }],
+      ...(sp.organization.displayName
+        ? { OrganizationDisplayName: [{ '@xml:lang': 'en', '#text': sp.organization.displayName }] }
+        : {}),
+      ...(sp.organization.url
+        ? { OrganizationURL: [{ '@xml:lang': 'en', '#text': sp.organization.url }] }
+        : {}),
+    }
+  }
+  if (sp?.contacts?.length) {
+    params.metadataContactPerson = sp.contacts
+      .filter(c => c?.email)
+      .map((c) => ({
+        '@contactType': c.contactType || 'technical',
+        EmailAddress: [c.email],
+      }))
+  }
+  // v5 signing seam (plan 11 §2.2, verified empirically): signing needs
+  // BOTH privateKey + publicCerts + signatureAlgorithm; the KEY is only for
+  // computing the signature, the CERT is what the registry sees.
+  if (sp?.privateKey && sp?.publicCert) {
+    params.signMetadata = true
+    params.privateKey = sp.privateKey
+    params.publicCerts = [sp.publicCert]
+    params.signatureAlgorithm = 'sha256'
+  }
+  return generateServiceProviderMetadata(params)
+}
+export function spFilename(sp, siteUrl) {
+  const url_ = String(siteUrl || '').replace(/\/+$/, '')
+  // Default: the site host (not the full <origin>/saml entityID, which would
+  // slugify into "https---..." dashes).
+  // Custom spEntityId: the host of the entityID (it is a URL).
+  // Custom spEntityId: use the host when it parses as a URL, else slug the
+  // full value (entity IDs may be bare domains/slugs too).
+  let host
+  if (sp?.spEntityId) {
+    try {
+      host = new URL(sp.spEntityId).host
+    } catch {
+      host = sp.spEntityId
+    }
+  } else {
+    host = new URL(url_).host
+  }
+  return `${host.replace(/[^a-zA-Z0-9.-]/g, '-')}-meta.xml`
 }
 
 export default SAMLAuthenticationController
