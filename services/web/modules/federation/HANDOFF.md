@@ -23,7 +23,7 @@ plain `fetch` + top-level `jose`, identity anchor = `(origin, localName)` tuple.
 | P2-test | Two-instance integration (live OIDC code dance + S2S round-trip) | **DONE** (12/12 green — see SESSION 8; TODO-a9c6dd79 closed) |
 | P2-live | Live smoke against real Mongo+Redis+oidc-provider+express (the module, not the mocks) | **DONE** (13 scenarios ALL PASS — see SESSION 10; `tools/live-smoke.mjs`) |
 | **V2** | **Content-bridge: export-project S2S + no-re-consent (2a), home export wizard (2b), read-only 403 + sweep (2c), two-real-origins smoke (2d) — Goal `3ea7bb53`** | **DONE** (**2a SHIPPED** — SESSION 12; **2b SHIPPED** — SESSION 13; **2c SHIPPED** — SESSION 14; **2d SHIPPED** — SESSION 15; all four steps committed + pushed; eduGAIN Phases 0/2/3/4 remain external-infra-blocked, plan/10) |
-| **V1-SSO** | **eduGAIN/DFN-AAI (SAML) + GEANT AAI (OIDC) SSO interop (plan/10): P1a framework port, P1b N-provider, P1c per-provider attrFilter, R1 synthetic-email JIT** | **SHIPPED** (P1a `0afb9048be`; P1b `90baca21f7`/`157eea5ec5`; P1c `8a99c05e79`; **R1 — SESSION 16**). Phases 0/2/3/4 remain **BLOCKED** on external Shibboleth-SP / DFN test IdP / GEANT Sandbox infra (plan/10) |
+| **V1-SSO** | **eduGAIN/DFN-AAI (SAML) + GEANT AAI (OIDC) SSO interop (plan/10): P1a framework port, P1b N-provider, P1c per-provider attrFilter, R1 synthetic-email JIT** | **SHIPPED** (P1a `0afb9048be`; P1b `90baca21f7`/`157eea5ec5`; P1c `8a99c05e79`; **R1 — SESSION 16**). Phases 0/2/3/4 remain **BLOCKED** on external Shibboleth-SP / DFN test IdP / GEANT Sandbox infra (plan/10). **Plan 11 (SESSION 17, recon)**: `/saml/meta` SP metadata for GEANT/DFN SP registration + GEANT OIDC leg — draft plan, impl next |
 
 ## 2. What already exists (all committed, DO NOT rewrite)
 
@@ -1477,5 +1477,19 @@ end-to-end behavior (SAML manager → User row → identifier) is exercised by t
 **What this does NOT close:** plan/10 Phase 0 (Shibboleth proxy), Phase 2 live
 (DFN test IdP login), Phase 3 (GEANT Sandbox registration + flow), Phase 4
 (cert-expiry runbook) — all require the external proxy/IdP env to exist. They
-remain external-infra-blocked as of this session. The goal's SSO leg now has
-ZERO remaining app-side work.
+remain external-infra-blocked as of this session. The goal's SSO leg is at
+ZERO *registration-flow* app-side work; SESSION 17 recon adds ONE new
+in-repo item (fix `/saml/meta` for GEANT/DFN SP registration — plan/11).
+
+# SESSION 17 (2026-09-24): Plan 11 RECON — SAML SP metadata + GEANT AAI SP registration (draft, no code)
+Goal `3dad1c9e`, SSO track. New plan `modules/federation/plan/11-saml-sp-metadata-and-geant-registration.md` (recon-only; all facts source-verified or live-verified this session).
+
+**Recon findings (the existing `/saml/meta` is NOT registration-ready):**
+- `/saml/meta` already exists: `modules/authentication/saml/app/src/SAMLRouter.mjs:15` → `SAMLAuthenticationController.getSPMetadata` (NOT in the federation module).
+- BUG 1 wrong entityID: metadata `entityID` = strategy `options.issuer` = `provider.issuer` (**the IdP's** issuer, `buildStrategyOptions`) → registries (DFN MDV / GEANT eduTEAMS MDS) must see *our* SP identifier.
+- BUG 2 not registrable: no `<Organization>`, no `<ContactPerson>` (exact v5.1.0 lib repro: ~655-char XML, 0 KeyDescriptor). REFEDS/eduGAIN MDS ingestion requires org + contact (+ signed).
+- BUG 3 unsigned + BUG 4 arg shape: no SP signing keypath wired; controller passes `publicCert` in the first-arg object but v5 expects `(decryptionCert, publicCerts)` positional → DB/env cert override silently ignored. (Callback arg is dead code; endpoint still answers — no hang.)
+- BUG 5: 500 (TypeError) when no SAML provider is enabled — handler dereferences `samlStratery._saml.options.issuer` before the guard.
+- `ssoConfigs` is a raw findOne (`ssoConfigLoader`), no mongoose model → `spMetadata` subdoc needs **no migration**.
+- GEANT live-verified: OIDC discovery `proxy.aai.geant.org` (scopes `openid profile email aarc voperson_id ...`; **no `jwks` in well-known** → open I2); SAML `frontend.xml` entityID `https://proxy.aai.geant.org/proxy`, signed, **no SLO published** (R0 compatible); GEANT form = org/contacts/policies URLs + jurisdiction + CoC/Sirtfi/R&S checkboxes + (SAML: metadata URL | eduGAIN entityID).
+- **Design (locked in plan 11):** rewrite `getSPMetadata` to call v5 `@node-saml/node-saml` `generateServiceProviderMetadata(params)` DIRECT (own entityID `spMetadata.spEntityId` || siteOrigin+/saml; org+contacts from `ssoConfigs.spMetadata`; `signMetadata = !!privateKey`; `Content-Type: application/saml-metadata+xml`; graceful SAML-disabled response). Admin PUT `spMetadata` + masked GET in SSO admin. v5 verified to accept all 4 params (live dry-run). Strategy/IdP-direction code untouched.

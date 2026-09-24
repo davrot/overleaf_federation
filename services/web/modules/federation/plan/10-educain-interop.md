@@ -317,6 +317,10 @@ with `https://proxy.aai.geant.org` issuer:
   jurisdiction, CoC/Sirtfi/R&S checkboxes).
 - Sandbox enforcement is provider-side (their consent page) — no app code.
 - Client-credentials (machine-to-machine groups): **not v1**.
+- **SAML leg & SP registration (metadata XML) are now plan 11**
+  (11-saml-sp-metadata-and-geant-registration.md) — this is the box that both
+  DFN-AAI and GEANT AAI require at submission. The OIDC leg above needs no code;
+  plan 11 fixes the SAML `/saml/meta` endpoint and adds GEANT SP registration.
 
 ## 3 — Phase plan (v3, decisions locked)
 
