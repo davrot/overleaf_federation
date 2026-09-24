@@ -410,10 +410,16 @@ App changes, discrete commits pushed:
 
 ### Phase 3 — GEANT AAI OIDC live
 - [ ] Register test env; `sub` persistent identity check; `aarc` scope; email-claim
-  behavior (optional vs provided) → decide synthetic-email default.
+  behavior (optional vs provided) → decide synthetic-email default.** [OPERATOR BLOCKED** — form + live registration at GEANT sandbox; app-side OIDC support (P1b N-provider + R1 synthetic-email JIT) ships the rest.]
 - [ ] Sandbox group flow (provider-side enforcement) — document admin
-  runbook.
+  runbook.** [OPERATOR BLOCKED — group enforcement is provider-side.]**
 - [ ] Production promotion checklist (form, CoC/Sirtfi/R&S, jurisdiction).
+  **[OPERATOR BLOCKED — promotion happens on GEANT's side after sandbox.]**
+
+### Phase 1 (closure note, S18)
+- [x] Federation OIDF module (ours) does NOT register a passport strategy
+  (provider-side `oidc-provider`) — no collision with stock OIDC strategy
+  (verify on port; document). **DONE (S18 audit):** grep-verified — `modules/federation` contains no `passport.use` call (oidc-provider is a self-contained OP stack, no passport integration).
 
 ### Phase 4 — Hardening
 - [x] Cert-expiry alerts (our SP cert, proxy cert) → ops runbook. **DONE (SESSION 18)**: `modules/authentication/ssoCertExpiry.mjs` (pure X.509 notAfter parse + boot-time sweep over `ssoConfigs.spMetadata.publicCert` inline + SAML provider `idpCert` paths + env path) wired into saml-authentication module `start()`; `SSO_CERT_EXPIRY_WARN_DAYS` env (default 30d) → `logger.warn 'sso cert expiry: …'` on expiry/within-window/unreadable (never throws). Runbook + alerting in FINDINGS.md §"eduGAIN interop — Phase 4 closure". 17 test cases (`test/unit/certExpiry.test.mjs`, openssl-generated certs). Residual: SAML test endpoint still reachability-only (G3 fetch+verify+extract manual — see FINDINGS residual).
