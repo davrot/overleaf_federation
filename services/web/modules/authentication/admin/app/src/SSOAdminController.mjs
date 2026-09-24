@@ -1,5 +1,6 @@
 import Path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
 import logger from '@overleaf/logger'
 import { db } from '../../../../../app/src/infrastructure/mongodb.mjs'
 import { clearConfigCache } from '../../../ssoConfigLoader.mjs'
@@ -569,23 +570,66 @@ async function _testOIDCProvider(provider, res) {
 
 async function _testSAMLProvider(provider, res) {
   try {
-    if (provider.entryPoint) {
-      const response = await fetch(provider.entryPoint, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(10000),
-      })
-      // SAML IdP entry points typically redirect, so 200 or 3xx are both OK
-      if (response.status < 500) {
-        return res.json({
-          success: true,
-          message: `SAML IdP endpoint reachable (HTTP ${response.status})`,
-        })
-      }
-      return res.json({ success: false, message: `SAML IdP returned HTTP ${response.status}` })
+    if (!provider.entryPoint && !provider.metadataUrl) {
+      return res.json({ success: false, message: 'No entry point or metadata URL configured' })
     }
-    return res.json({ success: false, message: 'No entry point URL configured' })
+    if (provider.metadataUrl) {
+      // G3 (plan/10 Phase 2): fetch metadata + verify XML-DSig + extract
+      // cert + pin against the trusted idpCert. Lazy import: the probe
+      // pulls in xml-crypto/xmldom and is only needed for SAML providers.
+      const { probeSamlMetadataUrl } = await import('../../../saml/app/src/samlMetadataProbe.mjs')
+      let trustedPem
+      if (provider.idpCert) {
+        try {
+          trustedPem = fs.readFileSync(provider.idpCert, 'utf8')
+        } catch {
+          trustedPem = undefined // unreadable cert path ⇒ skip pin, still probe
+        }
+      }
+      const probe = await probeSamlMetadataUrl(provider.metadataUrl, { trustedPem })
+      if (!probe.reachable) {
+        return res.json({ success: false, message: probe.message || probe.error })
+      }
+      const details = {}
+      if (probe.entityID) details['entityID'] = probe.entityID
+      details['signature'] = probe.signed
+        ? (probe.signatureValid ? 'valid' : 'INVALID')
+        : 'unsigned'
+      if (probe.certNotAfter) {
+        details['signing cert expiry'] = `${probe.certNotAfter} (${probe.certDaysLeft}d left)`
+      }
+      if (probe.matchesTrustedCert !== undefined) {
+        details['matches trusted idpCert'] = probe.matchesTrustedCert
+          ? 'yes'
+          : 'NO — cert rotation in progress or wrong metadata URL'
+      }
+      details['registrability'] = [
+        probe.hasOrganization && 'Organization',
+        probe.hasContactPerson && 'ContactPerson',
+      ]
+        .filter(Boolean)
+        .join(' + ') || 'neither'
+      return res.json({
+        success: probe.signatureValid && probe.matchesTrustedCert !== false,
+        message: probe.message,
+        details,
+      })
+    }
+    const response = await fetch(provider.entryPoint, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10000),
+    })
+    // SAML IdP entry points typically redirect, so 200 or 3xx are both OK
+    if (response.status < 500) {
+      return res.json({
+        success: true,
+        message: `SAML IdP endpoint reachable (HTTP ${response.status})`,
+      })
+    }
+    return res.json({ success: false, message: `SAML IdP returned HTTP ${response.status}` })
   } catch (error) {
+    logger.error({ error }, 'SAML provider test failed')
     return res.json({ success: false, message: `SAML test failed: ${error.message}` })
   }
 }

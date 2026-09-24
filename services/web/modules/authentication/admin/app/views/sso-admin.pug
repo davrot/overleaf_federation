@@ -508,6 +508,11 @@ block content
 							span.text-danger *
 						input.form-control.provider-field(type='text' data-field='issuer' placeholder='overleaf-sp')
 					.col-md-6
+						label.form-label Metadata URL (advanced)
+						input.form-control.provider-field(type='text' data-field='metadataUrl' placeholder='https://idp.example.com/metadata.xml')
+						span.form-text.text-muted If set, the Test button fetches this URL, verifies the XML-DSig signature, and extracts the signing cert / expiry.
+				.row.mb-3
+					.col-md-6
 						label.form-label Audience
 						input.form-control.provider-field(type='text' data-field='audience')
 

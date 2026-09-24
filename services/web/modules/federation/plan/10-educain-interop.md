@@ -400,8 +400,8 @@ App changes, discrete commits pushed:
   - OIDC mirror (`email` claim absent + `sub` present).
   - Env knobs: `OVERLEAF_SAML_SYNTHETIC_EMAIL_DOMAIN`,
     `OVERLEAF_OIDC_SYNTHETIC_EMAIL_DOMAIN`.
-- [ ] Admin SSO test endpoint extended for SAML (fetch metadata URL, verify
-  signature, extract cert — G3).
+- [x] Admin SSO test endpoint extended for SAML (fetch metadata URL, verify
+  signature, extract cert — G3). **DONE (SESSION 18)**: `modules/authentication/saml/app/src/samlMetadataProbe.mjs` (pure + side-effect-free except fetch; only declared deps: global fetch, `@xmldom/xmldom`, nested xml-crypto v6 that `@node-saml/node-saml` signs with — zero new deps). SSO admin SAML provider form gains optional "Metadata URL (advanced)" field (`metadataUrl`); "Test" now, when `metadataUrl` is set: fetches the URL (15s timeout), parses `EntityDescriptor` + `entityID`, extracts the signing `<KeyDescriptor use="signing">` cert (notAfter + PEM), verifies the metadata XML-DSig against that cert (mirrors `@node-saml/node-saml`'s assertion verify: `new SignedXml(); sig.publicCert = cert; sig.loadSignature(sigNode); sig.checkSignature(fullXml)`), optionally pins extracted cert vs the trusted `idpCert` (fingerprint256 — cert rotation / wrong URL is a hard failure), and reports registrability markers (`<Organization>` + `<ContactPerson>` — required for eduGAIN/GEANT). Tampered ⇒ `signatureValid=false`; unsigned ⇒ `UNSIGNED` warn; wrong pin ⇒ `matchesTrustedCert=false` with "cert rotation in progress or wrong metadata URL". 15 test cases (`test/unit/samlMetadataProbe.test.mjs`, openssl certs + local express server serving our own `generateServiceProviderMetadata` output).
 - [ ] SP metadata: verify `/saml/meta` carries DisplayName/InformationURL/
   contactPerson + English (R2); document as stable URL for mdv.
 - [ ] Live: DFN test IdP → Shibboleth proxy → Overleaf login → JIT →

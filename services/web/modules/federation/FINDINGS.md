@@ -427,11 +427,17 @@ Verified (no code change; the two tracks are structurally disjoint):
 
 ### Residual (not closed, recorded)
 
-- SSO admin test endpoint (`/admin/sso/test/provider/:providerId`) for
-  SAML is reachability-only (HTTP status). The Phase 2 G3 "fetch metadata
-  URL, verify signature, extract cert" remains manual until
-  G3 is implemented (xml-crypto + xml2js are already direct deps, but
-  the signature-verification path against a fetched SP/IdP metadata is
-  not yet wired into the endpoint).
+- SSO admin SAML test endpoint — CLOSED in this pass (S19): the weak "GET
+  entry-point reachability only" check is now extended per plan/10 Phase 2
+  (G3) by `samlMetadataProbe.mjs` (fetch metadata URL + verify XML-DSig
+  signature + extract signing KeyDescriptor cert + pin vs the trusted
+  `idpCert`). When a provider sets `metadataUrl` (new "Metadata URL
+  (advanced)" field on the SAML provider form), "Test" returns entityID,
+  `signatureValid`, `matchesTrustedCert`, `certNotAfter`, and
+  registrability markers (`Organization` + `ContactPerson`); an unsigned or
+  invalid-signature metadata URL is a hard `success:false`, so a cert
+  rotation that changes the proxy cert surfaces here before the next
+  metadata refresh. The legacy entry-point reachability check remains as
+  the baseline when `metadataUrl` is unset.
 - OIDF key rotation (INFO, SESSION 9) is a 501 stub (provider memo frozen;
   rotation requires restart) — unchanged.

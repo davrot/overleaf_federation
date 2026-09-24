@@ -1505,3 +1505,50 @@ Goal `3dad1c9e`, SSO track. New plan `modules/federation/plan/11-saml-sp-metadat
 - Full auth+federation vitest: 205/205 (18 files). `test/unit/src/Authentication/AuthenticationController.test.mjs`: 15 `requireOauth` timeouts PRE-EXISTING at HEAD (reproduced with my changes stashed) — environmental, unrelated.
 - TODO-223faa6a CLOSED (commit `25f412f765`): plan 11 app-side complete. Operator steps remain: fill SSO admin “SAML Metadata” tab org/contacts/(optional) key pair, save, preview /saml/meta, submit to GEANT/DFN form (plan 11 §3); I2 (GEANT OIDC jwks) + R2 (MDV signature requirement) still open.
 **Note:** v5 `generateServiceProviderMetadata(params)` is standalone + synchronous (`node-saml v5.1.0`, root node_modules); `@node-saml/passport-saml` Strategy `generateServiceProviderMetadata(decryptionCert, publicCerts)` is the IdP-direction method the old code wrongly called.
+
+**S19 IMPLEMENTATION (G3: SAML metadata probe — plan/10 Phase 2 + Phase 4 cert-expiry + no-cross-linking audit) — SHIPPED (this commit):**
+- DONE `modules/authentication/swoCertExpiry.mjs` (S18→S19 commit `18d58dc2ea`):
+  pure X.509 notAfter parse (node `X509Certificate`; no new dep) + boot-time
+  `sweepSsoCertExpiry()` sweep over `ssoConfigs.spMetadata.publicCert`
+  (inline) + `OVERLEAF_SAML_IDP_CERT` (path) + each enabled SAML provider
+  `idpCert` (path). Warn window `SSO_CERT_EXPIRY_WARN_DAYS` env (default 30d);
+  `logger.warn 'sso cert expiry: …'` on expiry/within-window/unreadable —
+  never throws. Wired into saml-authentication module `start()` (mounts only
+  when SAML enabled). Runbook in FINDINGS.md §"eduGAIN interop — Phase 4
+  closure". 17 test cases (`test/unit/certExpiry.test.mjs`, openssl 90d/10d/1d).
+- DONE (THIS COMMIT, G3) `modules/authentication/saml/app/src/samlMetadataProbe.mjs`:
+  pure + side-effect-free (except fetch). `extractSigningInfo(xml)` (entityID,
+  `use="signing"` KeyDescriptor cert PEM + notAfter/daysLeft, `<Organization>`,
+  `<ContactPerson>`); `verifyMetadataSignature(xml, certPem)` (mirrors
+  `@node-saml/node-saml` assertion verify — nested xml-crypto v6
+  `SignedXml().publicCert = cert; .loadSignature(sigNode); .checkSignature(xml)`
+  — proven: valid ⇒ true, tampered-entityID ⇒ false, wrong cert ⇒ false).
+  `probeSamlMetadataUrl(url, { trustedPem })` end-to-end: fetch (15s timeout,
+  `redirect: 'follow'`), not-XML reject, then extracts info; optional pin
+  (fingerprint256 extracted vs trusted `idpCert` — cert rotation / wrong
+  metadata URL is `matchesTrustedCert:false` hard failure).
+- DONE `modules/authentication/admin/app/src/SSOAdminController.mjs`:
+  `_testSAMLProvider` extended: when provider `metadataUrl` set ⇒ probe path
+  (returns `details: { entityID, signature, 'signing cert expiry',
+  'matches trusted idpCert', 'registrability' }`, success =
+  `signatureValid && matchesTrustedCert !== false`); else legacy
+  entry-point reachability. `import fs from 'fs'`→`import fs from 'node:fs'`
+  (unicorn/prefer-node-protocol — pre-existing debt now cleared).
+- DONE `modules/authentication/admin/app/views/sso-admin.pug`: SAML provider
+  form gains "Metadata URL (advanced)" optional field (`metadataUrl`) under
+  the Issuer/Metadata row; span explains Test behavior. Pug compiles OK.
+- DONE FINDINGS.md §"eduGAIN interop — Phase 4 closure": G3 residual
+  CLOSED (probe path in SSO admin; legacy reachability kept as baseline).
+  Cross-linking audit recorded (OIDF bridge is session-only; stock SSO
+  externalAuth 'saml'/'oidc' + `thirdPartyIdentities` via `linkAccount`
+  (`_doLink`) — structurally disjoint; no auto cross-track merge).
+- 15 test cases (`test/unit/samlMetadataProbe.test.mjs`) all green:
+  extract (entityID/signing cert/notAfter/org/contacts), verify
+  (valid/tampered/wrong-cert), live local express server (signed/
+  tampered/unsigned/not-XML/404/pin-mismatch/unreachable), controller
+  wiring (success + INVALID + legacy reachability).
+- Plan 11 / 10: Phase 4 hardening + Phase 2 G3 checklist both marked
+  DONE (this session). Remaining open: Phase 0 Shibboleth proxy (operator
+  infra), Phase 2 DFN live test (needs a real DFN test IdP + Shibboleth
+  proxy), Phase 3 GEANT sandbox (form), R2 (MDV signature requirement at
+  submission), CoC/R&S category placement (R3, DFN/GEANT confirm).
