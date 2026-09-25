@@ -56,8 +56,11 @@
  * idp/saml20-sp-remote.php).
  *
  * Exit code 0 = all green. The script owns its mongo namespace (drops the
- * `test-overleaf` db — NODE_ENV=test + the db name is the dropTestDatabase
- * guard) and its temp files.
+ * `test-overleaf` db) and its temp files. The drop is GUARDED: it only proceeds
+ * against a loopback `test-overleaf` db under NODE_ENV=test — the repo's own
+ * dropTestDatabase guard (libraries/mongo-utils/test-utils.js) is name+env
+ * only and is NOT wired into this raw connection path, so the harness
+ * replicates its intent plus a hostname check before the drop.
  */
 
 import fs from 'node:fs'
@@ -116,6 +119,25 @@ Settings.secureCookie = false
 Settings.behindProxy = false
 // cookieRollingSession off = no per-request session.touch side effects.
 Settings.cookieRollingSession = false
+
+// ── destructive guard (BEFORE the connection is used for a DROP). ──────────
+// `MONGO_CONNECTION_STRING ??=` above does NOT override an env value the
+// developer already exported (local dev / CI) — and the drop below is raw
+// `connection.dropDatabase()`, which bypasses the repo's name+env guard
+// (ensureTestDatabase, no host check). Only clear a loopback `test-overleaf`
+// db under NODE_ENV=test; otherwise refuse to touch that database.
+{
+  const connUrl = new URL(Settings.mongo.url)
+  const hostOk = ['127.0.0.1', 'localhost', '::1'].includes(connUrl.hostname.replace(/^\[|\]$/g, ''))
+  if (!hostOk || connUrl.pathname !== `/${MONGO_DB}` || process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      `Refusing to drop database '${connUrl.pathname}' at ${connUrl.hostname} ` +
+        `(NODE_ENV='${process.env.NODE_ENV}'). The S22 SAML smoke only clears a loopback ` +
+        `'test-overleaf' db under NODE_ENV=test. Unexport a local MONGO_CONNECTION_STRING/MONGO_URL, ` +
+        `or point the harness at the smoke stack: SMOKE_MONGO_PORT=${MONGO_PORT}, SMOKE_REDIS_PORT=${REDIS_PORT}.`,
+    )
+  }
+}
 
 // Real app infrastructure (the same singletons live-smoke.mjs uses). The
 // `mongodb.mjs` `db` map is COLECTIONS only (no `.connection` key); the drop

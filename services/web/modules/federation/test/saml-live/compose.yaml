@@ -27,26 +27,26 @@
 #   * ACS        https://smoke.example/saml/login/callback
 #   * SLO        https://smoke.example/saml/logout/callback
 # (the harness sets `Settings.siteUrl = https://smoke.example`; those are
-#  the *published* URLs — the IdP container receives them from the
-#  redirect and returns the SAMLResponse to them; the harness's fetch
-#  rewrite maps our own origin (https://smoke.example) back to the live
-#  local port.)
+#  the *published* URLs. The IdP returns the SAMLResponse for the published
+#  ACS; the harness itself replays it to ITS OWN local app ACS — it never
+#  fetches https://smoke.example — so no fetch rewriting is needed.)
 services:
   fed-smoke-mongo:
     image: mongo:7
     ports:
-      - "27107:27017"
+      # loopback-only (no password on mongo/redis — LAN exposure is not the point)
+      - "127.0.0.1:27107:27017"
   fed-smoke-redis:
     image: redis:7
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
   saml-idp:
     image: kristophjunge/test-saml-idp:latest
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
-      # Our smoke-SP registration into the IdP's flatfile metadata dir
+      # Our smoke-SP registration into the IdP's flatfile metadata dir.
+      # The stock image ships $metadata[...] entries that read SIMPLESAMLPHP_SP_*
+      # env vars; our hardcoded flatfile makes the registration reproducible and
+      # is the source of truth (verified end-to-end on a fresh image in S22).
       - ./idp/saml20-sp-remote.php:/var/www/simplesamlphp/metadata/saml20-sp-remote.php
-    environment:
-      # IdP debug off (2 = default; keep logs for ops)
-      - SIMPlesAMLphp_debug
