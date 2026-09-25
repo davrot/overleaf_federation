@@ -127,16 +127,25 @@ Settings.cookieRollingSession = false
 // (ensureTestDatabase, no host check). Only clear a loopback `test-overleaf`
 // db under NODE_ENV=test; otherwise refuse to touch that database.
 {
-  const connUrl = new URL(Settings.mongo.url)
-  const hostOk = ['127.0.0.1', 'localhost', '::1'].includes(connUrl.hostname.replace(/^\[|\]$/g, ''))
-  if (!hostOk || connUrl.pathname !== `/${MONGO_DB}` || process.env.NODE_ENV !== 'test') {
-    throw new Error(
-      `Refusing to drop database '${connUrl.pathname}' at ${connUrl.hostname} ` +
-        `(NODE_ENV='${process.env.NODE_ENV}'). The S22 SAML smoke only clears a loopback ` +
-        `'test-overleaf' db under NODE_ENV=test. Unexport a local MONGO_CONNECTION_STRING/MONGO_URL, ` +
-        `or point the harness at the smoke stack: SMOKE_MONGO_PORT=${MONGO_PORT}, SMOKE_REDIS_PORT=${REDIS_PORT}.`,
-    )
+  let refused
+  let connUrl
+  try {
+    connUrl = new URL(Settings.mongo.url)
+  } catch (e) {
+    refused =
+      `Refusing to parse connection string for the drop guard: ${e.message}` +
+      ` — ensure MONGO_CONNECTION_STRING is a single-host mongodb:// URL, or point the harness at the smoke stack (SMOKE_MONGO_PORT=${MONGO_PORT}, SMOKE_REDIS_PORT=${REDIS_PORT})`
   }
+  if (!refused) {
+    const hostOk = ['127.0.0.1', 'localhost', '::1'].includes(connUrl.hostname.replace(/^\[|\]$/g, ''))
+    if (!hostOk || connUrl.pathname !== `/${MONGO_DB}` || process.env.NODE_ENV !== 'test') {
+      refused =
+        `Refusing to drop database '${connUrl.pathname}' at '${connUrl.hostname}' (NODE_ENV='${process.env.NODE_ENV}')` +
+        ` — the S22 SAML smoke only clears a loopback 'test-overleaf' db under NODE_ENV=test.` +
+        ` Unexport a local MONGO_CONNECTION_STRING/MONGO_URL, or point the harness at the smoke stack (SMOKE_MONGO_PORT=${MONGO_PORT}, SMOKE_REDIS_PORT=${REDIS_PORT})`
+    }
+  }
+  if (refused) throw new Error(refused)
 }
 
 // Real app infrastructure (the same singletons live-smoke.mjs uses). The
