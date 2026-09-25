@@ -404,6 +404,28 @@ App changes, discrete commits pushed:
   signature, extract cert — G3). **DONE (SESSION 18)**: `modules/authentication/saml/app/src/samlMetadataProbe.mjs` (pure + side-effect-free except fetch; only declared deps: global fetch, `@xmldom/xmldom`, nested xml-crypto v6 that `@node-saml/node-saml` signs with — zero new deps). SSO admin SAML provider form gains optional "Metadata URL (advanced)" field (`metadataUrl`); "Test" now, when `metadataUrl` is set: fetches the URL (15s timeout), parses `EntityDescriptor` + `entityID`, extracts the signing `<KeyDescriptor use="signing">` cert (notAfter + PEM), verifies the metadata XML-DSig against that cert (mirrors `@node-saml/node-saml`'s assertion verify: `new SignedXml(); sig.publicCert = cert; sig.loadSignature(sigNode); sig.checkSignature(fullXml)`), optionally pins extracted cert vs the trusted `idpCert` (fingerprint256 — cert rotation / wrong URL is a hard failure), and reports registrability markers (`<Organization>` + `<ContactPerson>` — required for eduGAIN/GEANT). Tampered ⇒ `signatureValid=false`; unsigned ⇒ `UNSIGNED` warn; wrong pin ⇒ `matchesTrustedCert=false` with "cert rotation in progress or wrong metadata URL". 15 test cases (`test/unit/samlMetadataProbe.test.mjs`, openssl certs + local express server serving our own `generateServiceProviderMetadata` output).
 - [ ] SP metadata: verify `/saml/meta` carries DisplayName/InformationURL/
   contactPerson + English (R2); document as stable URL for mdv.
+- [x] App-side SAML live smoke (test-IdP substitute for the external DFN round) —
+  **DONE (SESSION 22 GREEN)**. `modules/federation/test/saml-live/`
+  (compose.yaml + idp/saml20-sp-remote.php + live-saml-smoke.mjs) drives the
+  REAL app SSO surface (`samlModule` + SAMLRouter/SAMLNonCsrfRouter +
+  `AuthenticationController.finishLogin` + R1/P1c) against a live signing
+  SimpleSAMLphp IdP (`kristophjunge/test-saml-idp`), proving R1 both
+  emails, P1c blocked-login 401 + `sso-login-denied` audit, S17 `/saml/
+  meta`, S18 cert-expiry sweep — end-to-end over a real SAML wire. The wire
+  is LIVE-VERIFIED (RAW-deflate redirect binding, required `Protocol
+  Binding`, auto-POST `SAMLResponse`; attrs = `uid`/`email`/`edu
+  PersonAffiliation` only, nameID transient — see HANDOFF S22 §22.1). The
+  harness is GREEN on `node live-saml-smoke.mjs` (IdP + mongo + redis on the
+  compose ports): s01 R1 leg-1 real-email login (200 + `redir` + account +
+  `ssoRoles.main` + `samlIdentifiers` + audit), s02 R1 leg-2 synthetic
+  `1@<siteHost>` (JIT + `syntheticEmail` flag, survives re-login), s03 P1c
+  `blocked` role 401 + `sso-login-denied` audit + NO account marker, s04
+  S17 `GET /saml/meta` 200 + `saml-metadata+xml` + Content-Disposition +
+  AC/SLO, s05 S18 cert-expiry sweep rows (`sp-metadata:publicCert` inline
+  PEM + `saml-provider:main` row parsed from the live IdP's ephemeral cert,
+  fetched at run time). All 21 scenario checks pass; exit 0. TODO-7d7f2441
+  closed. The external DFN/GEANT round remains operator-blocked (next
+  checkbox).
 - [ ] Live: DFN test IdP → Shibboleth proxy → Overleaf login → JIT →
   audit row `SAML login - <providerId>`.
 - [ ] SSO admin runbook (cert rotation flow, mdv submission).

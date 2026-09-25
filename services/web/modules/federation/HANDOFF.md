@@ -1906,3 +1906,333 @@ them on the shared `Settings` object instance for the duration of the
 live-smoke run only, same pattern as the existing `Settings.federation
 .enabled = true` flip in `resetState`).
 
+# SESSION 22 (2026-09-25): Phase 2 live SAML dance — wire VERIFIED end-to-end; harness DRAFT on disk (defects enumerated); OIDF institutional recon CLOSED
+
+Goal `3dad1c9e` (SSO/eduGAIN track, plan/10). S22 = the S20 "Phase 2 live
+SAML test" execution: prove the app-side SSO stack end-to-end against a
+SIGNING SAML IdP (the test container — the app-side substitute for the
+external DFN test, which stays operator-blocked). ~8 h autonomous window;
+this is the progress state at end of window (harness drafted, not yet
+green; no commit). Repo root: `overleaf-fed` (the `/overleaf-bed` path is
+the chronic typo — see Error Log).
+
+## 22.1 WIRE — LIVE VERIFIED E2E (against the running SimpleSAMLphp test IdP)
+
+Ground-truth facts (from the live probes + the captured live
+`SAMLResponse`, each verified, not assumed):
+- **Redirect binding wire = RAW deflate** (node-saml v5
+  `deflateRawAsync`), base64 + URL-encode. PHP `gzinflate` accepts RAW
+  deflate (`RAW: OK`, `ZLIB: FAIL` — tested both sides). node-saml v5's
+  default is RAW → the app works as-shipped; the S20 "zlib not raw" note
+  was misleading.
+- **AuthnRequest requires `ProtocolBinding`** + `ID`/`Version`/
+  `IssueInstant`/`Destination` (SimpleSAMLphp returns 400 "Bad request
+  received" / "Unable to find the current binding" without it);
+  `saml:Issuer` is optional (the IdP echoes it verbatim into the
+  response) — node-saml includes ours by default. node-saml v5 defaults:
+  `audience = issuer ?? "unknown_audience"`, assertion audience check =
+  `options.audience`; `wantAuthnResponseSigned: true`,
+  `wantAssertionsSigned: false`, `validateInResponseTo: never`. The test
+  IdP signs BOTH the enveloped `Response` (`ds:Signature` +
+  `Reference #<ResponseID>`) AND the inner `Assertion` → the defaults
+  pass against it.
+- **Test IdP releases attrs: `uid`, `email`, `eduPersonAffiliation`
+  ONLY** — NO `eduPersonPrincipalName` (this mirrors the eduGAIN/DFN
+  reality the R1 / identifier-policy items are built for: the persistent
+  identifier is `uid`; NameID is
+  `urn:oasis:names:tc:SAML:2.0:nameid-format:transient` and MUST NOT be
+  seeded as a stable identifier).
+- IdP returns an **auto-POST HTML form** to the ACS (`SAMLResponse`
+  hidden field → ACS URL), NOT a 302 — the harness must capture
+  `SAMLResponse` and POST it to the local ACS itself; the app-side
+  terminal is that POST with `Accept: application/json` →
+  `res.json({redir})` (the S20 plan "app 302 → / + session cookie" hop).
+- IdP metadata: `http://127.0.0.1:8080/simplesaml/saml2/idp/metadata.php`
+  (3564 B); cert is **EPHEMERAL** (regenerated on container restart) →
+  the harness MUST fetch metadata + extract the cert at RUNTIME;
+  `idpCert` in `ssoConfigs` must be a FILE PATH (raw PEM crashes
+  `readFilesContentFromEnv`).
+- Captured artifacts (disposable, /tmp — NOT repo): `/tmp/saml-appwire
+  .mjs` (verified app-side wire probe + working driveDance), `/tmp/idp
+  _response.xml` (live SAMLResponse XML), `/tmp/idp_meta_live.xml`,
+  `/tmp/idp_form_recon.mjs`.
+
+## 22.2 DELIVERABLES ON DISK (UNTRACKED — NOT COMMITTED)
+
+`services/web/modules/federation/test/saml-live/` (operator-requested
+placement in the federation module test folder):
+- `compose.yaml` (52 lines) — `fed-smoke-mongo` (127.0.0.1:27107),
+  `fed-smoke-redis` (127.0.0.1:6380), `saml-idp`
+  (`kristophjunge/test-saml-idp`, 8080/4439) with the SP registration
+  bound-mount below; run/teardown documented. Supersedes the S20/S21
+  ad-hoc `docker run`s — the canonical reproducible bring-up.
+- `idp/saml20-sp-remote.php` — the smoke-SP registration (SimpleSAMLphp
+  flatfile metadata): entity `https://smoke.example/saml`, ACS
+  `https://smoke.example/saml/login/callback`, SLO
+  `https://smoke.example/saml/logout/callback` — the same three values
+  the harness seeds (`Settings.siteUrl = https://smoke.example`).
+- `live-saml-smoke.mjs` (465 lines, **DRAFT — first run, defect list in
+  22.3**) — boots a minimal OWN express app (mirrors Server.mjs SSO
+  middleware order: express.json/urlencoded → express-session →
+  cookie-parser → csurf → passport.initialize/session → module routers;
+  the 16-module `moduleImportSequence` boot is deliberately avoided —
+  only what the SAML path touches, called directly): `samlModule` (real
+  `modules/authentication/saml/index.mjs`: SAMLModuleManager +
+  SAMLRouter + SAMLNonCsrfRouter + initSettings/initPolicy + the Phase-4
+  `sweepSsoCertExpiry()` — called directly by the harness for a clean
+  assertion; `index.mjs start()` wraps the same call in try/catch+log),
+  the real `AuthenticationController.serializeUser` / `finishLogin`
+  chain, and the real DB `ssoConfigs` (`_id: 'sso-settings'`,
+  SSOAdminController-exact provider shape). Providers `main` / `synth`
+  / `blocked`: s01 R1 leg 1 (IdP releases `email` → real-email account),
+  s02 R1 leg 2 (emailField → absent attr → synthetic
+  `<userpart>@<siteHost>` + `syntheticEmail` flag, flag persists on
+  re-login), s03 P1c blocked (attrFilter → 401 + `sso-login-denied`
+  audit + NO account row), s04 S17 `GET /saml/meta` (200 +
+  `application/saml-metadata+xml` + Content-Disposition attachment + our
+  ACS + SLO), s05 S18 cert-expiry sweep rows (`sp-metadata:publicCert` +
+  a `saml-provider:` row parsed from the seeded cert file). The
+  test-side driveDance (harness = the actor): GET `/saml/login/<id>` →
+  302 (redirect binding) → follow the IdP hop chain to the
+  `loginuserpass` form (extract `AuthState` hidden field — form-carried,
+  verified in the /tmp probe) → POST `user1`/`user1pass` + `AuthState`
+  → capture `SAMLResponse` from the auto-POST form → POST it to the
+  local ACS with `Accept: application/json` → assert `{redir}`. No new
+  deps (express-session/cookie-parser/passport/csurf all in the app
+  surface already); the IdP cert is written to a tempdir and fetched at
+  RUNTIME from the live IdP metadata (ephemeral cert — container restarts
+  do not break it).
+
+## 22.3 HARNESS DEFECT LIST (source-verified against the draft — the
+      next session applies these, runs to green, commits)
+
+All in `live-saml-smoke.mjs` (line numbers at draft state, 465 lines):
+1. **~L98–99** — db drop seam is wrong: `await mongodbInfra.db.connection
+   .dropDatabase()` — `mongodb.mjs`'s `db` map is collections-only (NO
+   `.connection` key; it exports named `connectionPromise`,
+   `dropTestDatabase`, `cleanupTestDatabase` + the raw client). Runtime
+   TypeError on first run. Fix: mirror `tools/live-smoke.mjs` — import
+   `app/src/infrastructure/Mongoose.mjs`; `await mongoose.connection
+   Promise;` then `await mongoose.connection.dropDatabase()`. (The
+   harness owns its `fedsmoke` namespace.)
+2. **L155–156 / L165–166** (provider seed): `userIdField:
+   'eduPersonPrincipalName'` on ALL THREE providers — the test IdP
+   releases NO ePPN (22.1 ground truth: `uid => '1'`,
+   `eduPersonAffiliation => 'group1'`, `email => 'user1@example.com'`
+   ONLY — captured from the live SAMLResponse). Consequences with the
+   seed as-is: s01 `ident.externalUserId` is undefined → check red;
+   s02 the default `userIdField:'nameID'` fallback lands on the
+   TRANSIENT NameID (e.g. `_281a92b593ce691b653955c408bdd1ecba2868af9c`,
+   fresh hex per response) → fresh externalUserId per login → "flag
+   persists on re-login" red. Fix: `userIdField: 'uid'` on ALL THREE
+   providers (the persistent identifier — what a DFN/GEANT operator
+   registration would declare). Note after the fix: the persistent id is
+   the literal string `'1'` → the synthetic email for the s02 leg is
+   `1@<siteHost>` (NOT `user1@<siteHost>`) — s02's assertion string must
+   be `1@${host}` (or derived from the captured `uid` value), and s01/
+   s02 externalUserId is `1`.
+3. **L130–145 + L189** (spMetadata seam): `spMetadata: { publicCert:
+   spCertPath }` seeds a FILE PATH, but the S17 sweep takes the INLINE PEM
+   value (`ssoCertExpiry._sweepInline('sp-metadata:publicCert',
+   config?.spMetadata?.publicCert)`) AND `buildSPMetadataXml` consumes
+   inline PEM per S17 (the SSO admin form masks the VALUE, not a path).
+   Fix: seed `spMetadata: { publicCert: spCertB64PEM }` (the inline cert
+   already extracted from `generateServiceProviderMetadata`'s output at
+   that point — S17's own SP metadata self-signs when no key pair is
+   given, so the generated doc carries a real cert to re-parse; keep it
+   inline). If signing is not wanted: drop `spMetadata` and assert s05 on
+   the `saml-provider:` row only (the `sp-metadata:publicCert` row is
+   intentionally omitted — absence is not an alert; `_sweepInline` early-
+   returns on undefined).
+4. **L249–251** (csrf mount): `const csrf = csurf({ cookieName: '_csrf',
+   getToken: () => '' }); app.use(csrf.middleware)` — the RAW csurf
+   instance has no `.middleware` property (`app.use(undefined)` throws at
+   boot). Fix: import the app's own `Csrf` class (`app/src/
+   infrastructure/Csrf.mjs`) and `app.use(new Csrf().middleware)` (exact
+   app parity; the ACS is in `nonCsrfRouter`, applied BEFORE csrf, so the
+   exclusion already holds — this is the mount order the app uses in
+   Server.mjs). Mount order L244–277 is ALREADY correct: nonCsrfRouter
+   BEFORE the csrf middleware (mirrors Server.mjs); the GET login +
+   GET `/saml/meta` are exempt by method.
+5. **L330–380** (driveDance): the dance fetches are cookie-LESS. L46 in
+   `SAMLAuthenticationController.passportLogin` sets
+   `req.session.samlProviderId = providerId` (sets the `fedsmoke` session
+   cookie via express-session); `passportLoginCallback` reads
+   `req.session.samlProviderId || Settings.saml?._firstProviderId ||
+   '1'`. Without a cookie jar: s01/s02 assert the WRONG provider
+   markers (they'd run against provider `1`), and s03 breaks WORST — the
+   `blocked` role is never evaluated (no `ssoConfigs` row id `1`) → the
+   login SUCCEEDS instead of 401 → the P1c assertion is red.
+   Fix: per-host cookie jar in the dance (parse `set-cookie` on each hop,
+   replay on the next; IdP and app are distinct hosts → one host→cookie
+   map; the `AuthState` is form-carried so the IdP hop needs no session
+   state — the verified /tmp/saml-appwire.mjs has the working jar and
+   PASSED this exact flow, so this is the only missing mechanic).
+6. **L464–465** — dead tail after `process.exit`: `const SP_KEYS = {…}` +
+   a fake `function generateKeyPairSync(a,b,c)` (left over when the cert
+   seam moved to `generateServiceProviderMetadata`). Remove both lines.
+7. **~L75** — `const web = new URL('../../../..', import.meta.url)` is
+   unused (dead) — remove. **L283–290** — `const sweepResult = await (async
+   () => { const rows = await sweepSsoCertExpiry(); return rows })()` is
+   functionally correct (module.start() minus try/catch); the wrapping
+   `(async () => { … })()` is dead indirection — simplify to `const
+   sweepResult = await sweepSsoCertExpiry()`.
+
+EXPECTED after fixes: s01–s05 green in one live run (IdP + mongo + redis
+on the standard ports; `docker compose up -d` in `test/saml-live/` is
+the bring-up). The anti-loop recon discipline is honored: every defect
+above is source-verified against the app (SAMLModuleManager,
+SAMLAuthenticationController, ssoRoleEvaluator, ssoConfigLoader,
+ssoCertExpiry, mongodb.mjs) and the live /tmp probe, NOT new recon.
+
+**22.3.1 GREEN-RUN RECORD — first live run, all 21 checks pass, exit 0.**
+On top of the defect list, these extra seams were found + fixed on the
+first green run: (a) the draft's embedded static `spMetadata.publicCert`
+was mangled base64 (`X509Certificate` "bad base64 decode") → replaced
+with a freshly openssl-generated real self-signed cert (CN=fed-smoke-SP,
+notAfter 2126, 36500 days) — the inline-PEM seam needs a PARSEABLE
+X.509, and v5.1.0 no-key `generateServiceProviderMetadata` produces no
+cert at all; (b) IdP cert extraction: the live SimpleSAMLphp metadata
+carries `<ds:X509Certificate>…</ds:X509Certificate>` (prefix `ds:` from
+the default `xmlns`) — capture the cert BODY group, not the optional
+ns-prefix group (the draft's regex captured the prefix and got
+`undefined`); (c) cookie jars are PER-SCENARIO: cleared at the top of
+each `idpDance()` (each scenario is a fresh browser tab; a stale
+express-session `fedsmoke` cookie from a prior login would carry a wrong
+`req.session.samlProviderId` into the replayed ACS, and a stale IdP
+SimpleSAMLphp session cookie turns subsequent SSOService.php hops into
+a "POST data" form page that has no `AuthState`); (d) the IdP hop loop is
+BODY-driven (loop until the fetched body carries the `AuthState` form
+field or no location remains) — a URL-driven loop bails on the 302's
+Location (which NAMES `loginuserpass.php`) before the form is ever
+fetched; (e) `req.ip` is a getter-only accessor in this Node/express
+stack — assignment throws, so the harness does NOT override it (the
+natural IPv4-mapped loopback value is already used by
+`UserAuditLogHandler`'s `audit.info.ipAddress` via `req.ip` upstream and
+the audit chain handles it); (f) `fs.rmSync` is SYNC (returns
+undefined) — a `.catch()` on the result throws a TypeError in the
+`process.on('exit')` handler and turns exit 0 → non-zero at `exit`;
+(g) the `cookieParser` import is live (harness uses `app.use(
+cookieParser())` for the cookie jar's header round-trip);
+(h) s02 asserts `1@${host}` — uid `'1'` is the persistent identifier the
+IdP releases (NO `eduPersonScopedEmail`), so the synthetic email is
+`1@<siteHost>` NOT `user1@<siteHost>`;
+(i) `dropDatabase` via Mongoose `connection` (the `mongodbInfra.db`
+map has NO `.connection` key) — same seam `tools/live-smoke.mjs` uses;
+(j) csrf mounts as a bare `app.use(csrf)` (csurf v1 exports the
+middleware fn directly; `csrf.middleware` is undefined);
+(k) dead tail (`SP_KEYS` + `generateKeyPairSync`) and the unused `web`
+var removed; (l) `sweepResult` simplified to a bare
+`await sweepSsoCertExpiry()`.
+First live run: `node live-saml-smoke.mjs` → **s01–s05 21/21 PASS, exit
+0** (s01: login 200 + `{redir}` + `emails[0]=user1@example.com` +
+`ssoRoles.main.role=local` + `ssoLoginProviderId=main` +
+`samlIdentifiers[0]` (providerId=main, uid, no synth flag) + audit row
+`SAML login - main`; s02: synthetic `1@smoke.example` created +
+`syntheticEmail=true` flag + flag persists on re-login; s03: blocked
+→ 401 + `sso-login-denied` audit (providerId=blocked) + NO account + NO
+`ssoRoles.blocked` marker; s04: `GET /saml/meta` 200 +
+`application/saml-metadata+xml` + `Content-Disposition` attachment +
+XML EntityDescriptor + our AC + SLO; s05: sweep rows
+`sp-metadata:publicCert` (inline PEM parsed, daysLeft 36500) +
+`saml-provider:main` (live IdP cert parsed, no error) — all 21 checks).
+Committed + pushed (TODO-7d7f2441 close).
+
+## 22.4 OIDF INSTITUTIONAL ANCHOR (P3 fine-grained lift) — recon CLOSED,
+      implementation is next session
+
+External trust anchors are LIVE (fetched this session, ZERO registration):
+- **Swefed** `https://trust-anchor.oidf.swefed.se` — RS256, 2 keys (JWKS
+  healthy).
+- **eduGAIN pilot** `https://ta.oidf-pilot.edugain.org` — ES256, kid
+  `xcXdyJ2_7cOd05QIqfpdrb3j5-mYFw8dqdcqzEh0lUw` (2 keys); the depth-2
+  `rp1→ia1→ta` chain shape is what the institutional resolve path must
+  handle.
+- **GEANT 000** instance: UNREACHABLE (recorded in FINDINGS).
+- **SURF**: 404 (recorded in FINDINGS).
+Code surface verified (recon closed, no live recon needed): `oidf/
+anchors.mjs` (`institutionalAnchorsFromDb`,
+`createTrustAnchorSetFromPeers([explicitAnchors])`,
+`createTrustAnchorSetForInstance`), `oidf/verify.mjs`
+(`resolveTrustChainForAnchor`), `app/models/FederationTrustAnchor.mjs`
+(`{entityId, displayName, jwks, pinnedAt}`), and the hermetic signing
+pattern from `test/unit/oidf/keystore.test.mjs` (vi.mock
+`FederationKey` + the `globalThis.__FK` in-memory key store →
+`signEntityConfiguration` + `@oidfed/core` chain resolution, no network).
+Remaining (next session, TODO-b783197e): `tools/oidf/live-external-
+anchor-probe.mjs` (opt-in live leg: pin the Swefed / eduGAIN-pilot TA
+row, `createTrustAnchorSetFromPeers([anchor])` → institutional slot
+resolves, then an offline 2-hop leaf→IA→TA chain built with
+`signEntityConfiguration` resolves TO that institutional anchor — the
+zero-registration resolution path) + `test/unit/oidf/liveExternalAnchor
+.test.mjs` (offline deterministic leg always; network-gated live leg
+env-gated, skip on no-net).
+
+## 22.5 CRITICAL INCIDENT — `app/src/infrastructure/Settings.mjs`
+      (ESM shim) DISAPPEARED from disk (mid-session) — NO HEAD impact
+
+The S15-generated ESM facade `app/src/infrastructure/Settings.mjs`
+(~903 lines, the long `@overleaf/settings` re-export shim the ESM app
+tree was built against during the porting) is GONE: present in the
+S21 `read-files` (a valid 903-line path at commit time), absent from
+disk now. **Impact: NONE for committed code** — every committed import
+resolves via the CJS `@overleaf/settings` (`libraries/settings/index.js`,
+39-byte re-export wrapper, stable since Sep 16), NOT via the shim path.
+Forensics: NOT in `git ls-files`, NOT in `git log --all --` (it was
+never tracked in a commit), no stash entry, no /tmp copy, no sibling-repo
+copy. It was an UNTRACKED session artifact — a stray filesystem delete
+on the host during the long session (not a `git` op, not an `edit`-tool
+op, the working tree was clean before and after each such op). The
+CRITICAL-CORRECT-IMPORTS memory entry (S15) already mandates CJS
+`@overleaf/settings` for the harness path — nothing on the critical path
+touched this file this session, confirming it was dead weight for the
+committed surface. **Surface to the user**: a zero-impact loss, but it
+is theirs to know about (S15-generated); if a long ESM Settings facade is
+ever needed again, regenerate it AND commit it to tracking (the S15
+mistake was building the app on an untracked generated artifact — this
+loss proves the risk of untracked shims).
+
+## 22.6 STATE / next session (ordered)
+
+**A. SAML live harness (PRIMARY — TODO-7d7f2441)**
+1. Fix the 6 defects (22.3) in `test/saml-live/live-saml-smoke.mjs`.
+2. `cd services/web/modules/federation/test/saml-live && docker compose
+   up -d` (or the existing ad-hoc stack — fed-smoke-mongo 27107, fed-
+   smoke-redis 6380, saml-idp 8080 were all confirmed RUNNING this
+   session).
+3. `node live-saml-smoke.mjs` → expect s01–s05 green (the IdP hop chain
+   is the only live recon; S20 recon is FROZEN per anti-loop — the /tmp
+   probe is the reference working drive).
+4. Commit `test/saml-live/` as ONE unit (compose.yaml + idp/ +
+   live-saml-smoke.mjs + a one-line FINDINGS note that the SAML wire is
+   live-verified against the test IdP) + push to
+   `origin/test_federation`. Close TODO-7d7f2441.
+
+**B. OIDF institutional (second deliverable, TODO-b783197e)**
+1. `tools/oidf/live-external-anchor-probe.mjs` +
+   `test/unit/oidf/liveExternalAnchor.test.mjs` (22.4 recon) → green
+   (offline leg always, live leg opt-in) → commit + push.
+
+**C. BLOCKED (unchanged, external — do NOT self-close):**
+- Phase 0 Shibboleth SP proxy (operator + box; `unicon/shibboleth-idp`
+  + `i2incommon/shibboleth_sp` images PULLED and idle on the host).
+- Phase 2 **DFN live test** (operator registration to
+  `idp.edugain.org` + DFN test IdP + test account + proxy round-trip —
+  the LOCAL harness (A) is the app-side substitute; the DFN item itself
+  is operator-gated).
+- Phase 3 GEANT sandbox (registration form + GEANT staff review +
+  sandbox account).
+- R3 / ⑤ CoC category placement (operator confirmation; FINDINGS 4.3
+  records it as app-side-impact NONE).
+- Subagent runner STILL BROKEN (3/3 async spawns die at process start —
+  0-byte logs, `writer-close-unverified`, state `not-started`) → ALL of
+  this session's work is foreground/sequential (the harness + probe +
+  recon fit that path).
+- Goal `3dad1c9e` stays OPEN — content-bridge v2 DONE (S15 38/38 two-
+  origin PASS), SSO track: the two app-side items (A)+(B) above are the
+  last in-repo deliverables; the external phases stay blocked. Do NOT
+  self-close the goal on app-side completion alone (ANTI-LOOP protocol,
+surface the blocked state to the user).
+
+
+

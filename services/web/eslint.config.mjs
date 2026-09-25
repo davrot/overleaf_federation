@@ -849,6 +849,17 @@ export default defineConfig([
     },
   },
   {
+    // S22 live SAML dance harness (a live smoke SCRIPT, not a unit test):
+    // reports scenario results to the terminal — same console-report shape
+    // as modules/federation/tools/live-smoke.mjs (which this glob never
+    // matches). Keep it minimal: no-console only.
+    files: ['modules/federation/test/saml-live/*.{js,mjs}'],
+
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     files: ['**/*.worker.{js,ts}'],
 
     rules: {
